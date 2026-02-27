@@ -148,12 +148,12 @@ api.route("GET /me", {
 
 ---
 
-## sst.aws.Table (DynamoDB)
+## sst.aws.Dynamo (DynamoDB)
 
 Single DynamoDB table with optional GSIs and streams.
 
 ```typescript
-const table = new sst.aws.Table("RunwayTable", {
+const table = new sst.aws.Dynamo("RunwayTable", {
   // Primary key
   fields: {
     PK: "string",

@@ -279,8 +279,13 @@ These metrics appear in CloudWatch under the `Runway/Business` namespace within 
 A CloudWatch dashboard that shows Lambda error rate and duration is table stakes. More useful: a dashboard that shows whether the *business* is working.
 
 ```typescript
-// Infrastructure: define the dashboard in SST (CDK escape hatch)
+// Infrastructure: define the dashboard in SST using the CDK escape hatch.
+// Stack.of() retrieves the CDK stack SST builds internally — pass any .nodes construct.
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cdk from "aws-cdk-lib";
+import { Stack } from "aws-cdk-lib";
+
+const stack = Stack.of(invoiceHandler.nodes.function);
 
 const dashboard = new cloudwatch.Dashboard(stack, "RunwayDashboard", {
   dashboardName: `Runway-${$app.stage}`,
@@ -319,11 +324,12 @@ const dashboard = new cloudwatch.Dashboard(stack, "RunwayDashboard", {
     [
       new cloudwatch.GraphWidget({
         title: "API Error Rate",
-        left: [apiGateway.metricClientError(), apiGateway.metric5XXError()],
+        // Access the underlying CDK HttpApi construct via .nodes
+        left: [api.nodes.httpApi.metricClientError(), api.nodes.httpApi.metric5XXError()],
       }),
       new cloudwatch.GraphWidget({
         title: "Lambda Duration p99",
-        left: [invoiceHandler.metricDuration({ statistic: "p99" })],
+        left: [invoiceHandler.nodes.function.metricDuration({ statistic: "p99" })],
       }),
     ],
   ],
@@ -421,9 +427,10 @@ The minimum alerting surface for Runway:
 
 ```typescript
 // sst.config.ts
+// stack is already defined above via Stack.of(invoiceHandler.nodes.function)
 const errorAlarm = new cloudwatch.Alarm(stack, "ApiErrorAlarm", {
   alarmName: `${$app.stage}-RunwayApiErrors`,
-  metric: invoiceHandler.metricErrors({
+  metric: invoiceHandler.nodes.function.metricErrors({
     period: cdk.Duration.minutes(5),
     statistic: "Sum",
   }),
@@ -444,17 +451,21 @@ Set `threshold` based on your traffic. 5 errors in 5 minutes might be fine if yo
 Any message in a DLQ is a symptom. You want to know about it.
 
 ```typescript
-const dlqAlarm = new cloudwatch.Alarm(stack, "EmailDlqAlarm", {
-  alarmName: `${$app.stage}-EmailDlqHasMessages`,
-  metric: emailDlq.metricApproximateNumberOfMessagesVisible({
-    period: cdk.Duration.minutes(5),
-    statistic: "Sum",
-  }),
-  threshold: 1,
-  evaluationPeriods: 1,
-  comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-});
+const emailDlq = emailQueue.nodes.deadLetterQueue;
+
+const dlqAlarm = emailDlq
+  ? new cloudwatch.Alarm(stack, "EmailDlqAlarm", {
+      alarmName: `${$app.stage}-EmailDlqHasMessages`,
+      metric: emailDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: "Sum",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    })
+  : undefined;
 ```
 
 Zero tolerance on DLQs. One message in the DLQ should alert.
@@ -464,6 +475,8 @@ Zero tolerance on DLQs. One message in the DLQ should alert.
 A Lambda function approaching its timeout is a ticking clock. Set a duration alarm at 80% of the configured timeout:
 
 ```typescript
+const invoiceChaserFn = invoiceChaserJob.nodes.function;
+
 const timeoutWarning = new cloudwatch.Alarm(stack, "InvoiceChaserDurationWarning", {
   alarmName: `${$app.stage}-InvoiceChaserSlowdown`,
   metric: invoiceChaserFn.metricDuration({
@@ -485,6 +498,8 @@ Create an SNS topic, subscribe Slack (via a Lambda that forwards to the Slack In
 // sst.config.ts
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as snsSubscriptions from "aws-cdk-lib/aws-sns-subscriptions";
+import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
+// stack is already defined via Stack.of(invoiceHandler.nodes.function) above
 
 const alertTopic = new sns.Topic(stack, "AlertTopic");
 
@@ -501,7 +516,7 @@ alertTopic.addSubscription(
 
 // Wire alarms to the topic
 errorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
-dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
+if (dlqAlarm) dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
 ```
 
 ```typescript

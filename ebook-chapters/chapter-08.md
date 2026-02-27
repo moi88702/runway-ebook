@@ -272,10 +272,14 @@ Set up a CloudWatch alarm on the DLQ so you know when it gets messages:
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
+import { Stack } from "aws-cdk-lib";
 
-// After defining the DLQ, escape hatch to CDK for the alarm:
-const emailDlq = emailQueue.nodes.deadLetterQueue; // SST exposes the CDK construct
+// SST v3 builds its components on CDK internally. Access the CDK stack via
+// Stack.of() on any .nodes construct — it walks up the construct tree to find it.
+const emailDlq = emailQueue.nodes.deadLetterQueue;
 if (emailDlq) {
+  const stack = Stack.of(emailDlq);
+
   const alarm = new cloudwatch.Alarm(stack, "EmailDlqAlarm", {
     metric: emailDlq.metricApproximateNumberOfMessagesVisible(),
     threshold: 1,
@@ -543,10 +547,14 @@ EventBridge has a built-in archive and replay feature. Turn it on and every even
 // sst.config.ts — enable archiving on the event bus
 const eventBus = new sst.aws.Bus("RunwayBus");
 
-// SST doesn't expose the archive directly yet — CDK escape hatch:
+// SST doesn't expose the archive directly yet — CDK escape hatch.
+// Stack.of() resolves the CDK stack from any .nodes construct.
 import * as events from "aws-cdk-lib/aws-events";
+import { Stack } from "aws-cdk-lib";
 
 const cfnBus = eventBus.nodes.bus; // The underlying CDK construct
+const stack = Stack.of(cfnBus);
+
 new events.CfnArchive(stack, "RunwayBusArchive", {
   sourceArn: cfnBus.attrArn,
   retentionDays: 90,
@@ -678,8 +686,11 @@ Set up a CloudWatch alarm on Lambda errors for each cron job:
 ```typescript
 // After defining invoiceChaserJob in sst.config.ts
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cdk from "aws-cdk-lib";
+import { Stack } from "aws-cdk-lib";
 
 const chaserFunction = invoiceChaserJob.nodes.function; // The Lambda CDK construct
+const stack = Stack.of(chaserFunction);
 
 const chaserErrorAlarm = new cloudwatch.Alarm(stack, "InvoiceChaserErrors", {
   metric: chaserFunction.metricErrors({
@@ -784,6 +795,8 @@ A Runway example: year-end report generation with multiple sequential phases.
 // sst.config.ts
 import * as sfn from "aws-cdk-lib/aws-stepfunctions";
 import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
+import * as cdk from "aws-cdk-lib";
+import { Stack } from "aws-cdk-lib";
 
 const fetchDataFn = new sst.aws.Function("FetchReportData", {
   handler: "src/jobs/report/fetch-data.handler",
@@ -802,7 +815,11 @@ const notifyUserFn = new sst.aws.Function("NotifyReportReady", {
   link: [emailQueue],
 });
 
-// Define the state machine in CDK (SST doesn't yet have a first-class StateMachine component)
+// SST doesn't yet have a first-class StateMachine component.
+// Use Stack.of() to get the CDK stack from any .nodes construct,
+// then define the state machine directly in CDK.
+const stack = Stack.of(fetchDataFn.nodes.function);
+
 const fetchDataTask = new tasks.LambdaInvoke(stack, "FetchData", {
   lambdaFunction: fetchDataFn.nodes.function,
   outputPath: "$.Payload",

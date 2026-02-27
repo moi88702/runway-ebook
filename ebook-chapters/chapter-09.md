@@ -77,9 +77,14 @@ Setting it up in AWS:
 // sst.config.ts — add this to your infrastructure
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as cdk from "aws-cdk-lib";
+import { Stack } from "aws-cdk-lib";
 
 const githubOrg = "your-org";
 const githubRepo = "runway";
+
+// Stack.of() retrieves the CDK stack that SST builds internally.
+// Pass any .nodes construct — here we use the API's underlying CDK construct.
+const stack = Stack.of(api.nodes.httpApi);
 
 const oidcProvider = new iam.OpenIdConnectProvider(stack, "GithubOidcProvider", {
   url: "https://token.actions.githubusercontent.com",
