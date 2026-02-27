@@ -324,8 +324,8 @@ const CreateInvoiceSchema = z.object({
   lineItems: z.array(z.object({
     description: z.string().min(1),
     quantity: z.number().positive(),
-    unitPrice: z.number().nonnegative(),
-    amount: z.number().nonnegative(),
+    unitPriceCents: z.number().int().nonnegative(),
+    amountCents: z.number().int().nonnegative(),
   })).min(1),
   currency: z.enum(["GBP", "USD", "EUR"]).default("GBP"),
   issueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD"),
@@ -586,18 +586,18 @@ const isoDate = z.string().regex(ISO_DATE, "Must be a date in YYYY-MM-DD format"
 export const LineItemSchema = z.object({
   description: z.string().trim().min(1, "Description is required").max(500),
   quantity: z.number().positive("Quantity must be positive"),
-  unitPrice: z.number().nonnegative("Unit price cannot be negative"),
-  // Amount is validated to equal quantity * unitPrice (within rounding tolerance)
-  amount: z.number().nonnegative(),
+  unitPriceCents: z.number().int().nonnegative("Unit price cannot be negative"),
+  // amountCents is validated to equal quantity * unitPriceCents (within rounding tolerance)
+  amountCents: z.number().int().nonnegative(),
 }).superRefine((item, ctx) => {
-  const expected = Math.round(item.quantity * item.unitPrice);
-  const actual = Math.round(item.amount);
+  const expected = Math.round(item.quantity * item.unitPriceCents);
+  const actual = item.amountCents;
   // Allow 1 unit of rounding difference
   if (Math.abs(expected - actual) > 1) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ["amount"],
-      message: `Amount (${item.amount}) does not match quantity × unit price (${expected})`,
+      path: ["amountCents"],
+      message: `amountCents (${item.amountCents}) does not match quantity × unitPriceCents (${expected})`,
     });
   }
 });
@@ -1532,7 +1532,7 @@ describe("CreateInvoiceSchema", () => {
   const validInput = {
     clientId: "cli_abc123",
     lineItems: [
-      { description: "Website redesign", quantity: 1, unitPrice: 5000, amount: 5000 },
+      { description: "Website redesign", quantity: 1, unitPriceCents: 5000, amountCents: 5000 },
     ],
     issueDate: "2025-03-01",
     dueDate: "2025-04-01",
@@ -1601,13 +1601,13 @@ describe("CreateInvoiceSchema", () => {
 });
 
 describe("LineItemSchema", () => {
-  it("validates amount matches quantity × unitPrice", () => {
-    const valid = { description: "Work", quantity: 2, unitPrice: 100, amount: 200 };
+  it("validates amountCents matches quantity × unitPriceCents", () => {
+    const valid = { description: "Work", quantity: 2, unitPriceCents: 100, amountCents: 200 };
     expect(LineItemSchema.safeParse(valid).success).toBe(true);
   });
 
   it("rejects amount that doesn't match", () => {
-    const invalid = { description: "Work", quantity: 2, unitPrice: 100, amount: 150 };
+    const invalid = { description: "Work", quantity: 2, unitPriceCents: 100, amountCents: 150 };
     const result = LineItemSchema.safeParse(invalid);
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -1623,7 +1623,7 @@ describe("formatZodError", () => {
     const result = CreateInvoiceSchema.safeParse({
       clientId: "cli_1",
       lineItems: [
-        { description: "", quantity: 1, unitPrice: 100, amount: 100 }, // empty description
+        { description: "", quantity: 1, unitPriceCents: 100, amountCents: 100 }, // empty description
       ],
       issueDate: "2025-03-01",
       dueDate: "2025-04-01",
@@ -2658,14 +2658,14 @@ Request:
       {
         "description": "Website redesign — March 2025",
         "quantity": 1,
-        "unitPrice": 500000,
-        "amount": 500000
+        "unitPriceCents": 500000,
+        "amountCents": 500000
       },
       {
         "description": "Hosting setup",
         "quantity": 1,
-        "unitPrice": 25000,
-        "amount": 25000
+        "unitPriceCents": 25000,
+        "amountCents": 25000
       }
     ],
     "currency": "GBP",
@@ -2684,8 +2684,8 @@ Response 201:
       "projectId": "proj_xyz789",
       "status": "draft",
       "lineItems": [
-        { "description": "Website redesign — March 2025", "quantity": 1, "unitPrice": 500000, "amount": 500000 },
-        { "description": "Hosting setup", "quantity": 1, "unitPrice": 25000, "amount": 25000 }
+        { "description": "Website redesign — March 2025", "quantity": 1, "unitPriceCents": 500000, "amountCents": 500000 },
+        { "description": "Hosting setup", "quantity": 1, "unitPriceCents": 25000, "amountCents": 25000 }
       ],
       "subtotal": 525000,
       "tax": 105000,
@@ -2716,7 +2716,7 @@ Response 422 (line item amount wrong):
       "code": "UNPROCESSABLE",
       "message": "Validation failed",
       "fields": {
-        "lineItems.0.amount": ["Amount (400000) does not match quantity × unit price (500000)"]
+        "lineItems.0.amountCents": ["amountCents (400000) does not match quantity × unitPriceCents (500000)"]
       }
     }
   }
