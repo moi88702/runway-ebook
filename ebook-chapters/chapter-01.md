@@ -206,7 +206,7 @@ Here's a preview of what this looks like. We'll build the full table in Chapter 
 
 ```typescript
 // sst.config.ts
-const table = new sst.aws.Dynamo("WorkspacesTable", {
+const table = new sst.aws.Dynamo("RunwayTable", {
   fields: { pk: "string", sk: "string" },
   primaryIndex: { hashKey: "pk", rangeKey: "sk" },
 });
@@ -221,9 +221,9 @@ api.route("GET /workspaces", {
 // src/functions/workspaces.ts
 import { Resource } from "sst";
 
-// Resource.WorkspacesTable.name is fully typed
+// Resource.RunwayTable.name is fully typed
 // Lambda has DynamoDB read/write permissions automatically
-const tableName = Resource.WorkspacesTable.name;
+const tableName = Resource.RunwayTable.name;
 ```
 
 No manual environment variable configuration. No IAM policy documents. One line.
@@ -334,7 +334,7 @@ export default $config({
         : false,
     });
 
-    const table = new sst.aws.Dynamo("WorkspacesTable", {
+    const table = new sst.aws.Dynamo("RunwayTable", {
       fields: { pk: "string", sk: "string" },
       primaryIndex: { hashKey: "pk", rangeKey: "sk" },
       // Scale down in non-production to save costs
