@@ -876,7 +876,7 @@ export type LineItem = {
   amount: number;
 };
 
-export type InvoiceStatus = "draft" | "sent" | "viewed" | "paid" | "overdue" | "cancelled";
+export type InvoiceStatus = "draft" | "sent" | "paid" | "overdue" | "cancelled";
 
 export type Invoice = {
   id: string;
@@ -1320,7 +1320,7 @@ export const invoiceService = {
       throw errors.invoiceNotFound(invoiceId);
     }
 
-    if (invoice.status === "sent" || invoice.status === "viewed") {
+    if (invoice.status === "sent") {
       throw errors.invoiceAlreadySent(invoiceId);
     }
 

@@ -643,7 +643,7 @@ export const UpdateInvoiceSchema = z.object({
 export const InvoiceQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
   cursor: z.string().optional(),
-  status: z.enum(["draft", "sent", "viewed", "paid", "overdue", "cancelled"]).optional(),
+  status: z.enum(["draft", "sent", "paid", "overdue", "cancelled"]).optional(),
   clientId: z.string().optional(),
   projectId: z.string().optional(),
 });
@@ -665,7 +665,7 @@ Go back to `src/types/invoice.ts`. Most of it goes away:
 // Types are now derived from schemas. Keep only the output types
 // that represent database/API response shapes (not input shapes).
 
-export type InvoiceStatus = "draft" | "sent" | "viewed" | "paid" | "overdue" | "cancelled";
+export type InvoiceStatus = "draft" | "sent" | "paid" | "overdue" | "cancelled";
 
 export type Invoice = {
   id: string;
@@ -2754,7 +2754,7 @@ Response 422 (invalid status):
       "code": "UNPROCESSABLE",
       "message": "Invalid query parameters",
       "fields": {
-        "status": ["Invalid enum value. Expected 'draft' | 'sent' | 'viewed' | 'paid' | 'overdue' | 'cancelled', received 'pending'"]
+        "status": ["Invalid enum value. Expected 'draft' | 'sent' | 'paid' | 'overdue' | 'cancelled', received 'pending'"]
       }
     }
   }
