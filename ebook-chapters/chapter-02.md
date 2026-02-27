@@ -1584,8 +1584,9 @@ const table = new sst.aws.Dynamo("RunwayTable", {
   primaryIndex: { hashKey: "pk", rangeKey: "sk" },
 });
 
-// S3 bucket for invoice PDFs
-const invoiceBucket = new sst.aws.Bucket("InvoiceBucket");
+// S3 buckets — full setup in Chapter 6; defined here so functions can be linked
+const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
+const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
 
 // Secrets — set via `npx sst secret set`
 const stripeSecretKey = new sst.Secret("StripeSecretKey");
@@ -1593,7 +1594,7 @@ const stripeWebhookSecret = new sst.Secret("StripeWebhookSecret");
 
 // Register routes with the right environment
 const functionConfig = {
-  link: [table, invoiceBucket, stripeSecretKey, stripeWebhookSecret],
+  link: [table, deliverablesBucket, invoicesBucket, stripeSecretKey, stripeWebhookSecret],
   environment: {
     SST_STAGE: $app.stage,
     APP_URL: $app.stage === "production"
@@ -2253,13 +2254,15 @@ export default $config({
       primaryIndex: { hashKey: "pk", rangeKey: "sk" },
     });
 
-    const invoiceBucket = new sst.aws.Bucket("InvoiceBucket");
+    // S3 buckets — full setup in Chapter 6; defined here so functions can be linked
+    const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
+    const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
 
     const stripeSecretKey = new sst.Secret("StripeSecretKey");
     const stripeWebhookSecret = new sst.Secret("StripeWebhookSecret");
 
     const sharedFunctionConfig = {
-      link: [table, invoiceBucket, stripeSecretKey, stripeWebhookSecret],
+      link: [table, deliverablesBucket, invoicesBucket, stripeSecretKey, stripeWebhookSecret],
       environment: {
         SST_STAGE: $app.stage,
         APP_URL: isProd

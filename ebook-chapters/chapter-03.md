@@ -2376,7 +2376,9 @@ export default $config({
       ttl: "ttl",
     });
 
-    const invoiceBucket = new sst.aws.Bucket("InvoiceBucket");
+    // S3 buckets — full setup in Chapter 6; defined here so functions can be linked
+    const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
+    const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
 
     // ─── API Gateway ───────────────────────────────────────────────────────
     const allowedOrigins = isProd
@@ -2417,7 +2419,7 @@ export default $config({
 
     // ─── Shared function config ─────────────────────────────────────────────
     const sharedFunctionConfig = {
-      link: [table, invoiceBucket, stripeSecretKey, stripeWebhookSecret],
+      link: [table, deliverablesBucket, invoicesBucket, stripeSecretKey, stripeWebhookSecret],
       environment: {
         SST_STAGE: $app.stage,
         APP_URL: isProd

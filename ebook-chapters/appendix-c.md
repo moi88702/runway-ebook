@@ -237,7 +237,7 @@ Resource.RunwayDb.password    // Admin password (from Secrets Manager)
 S3 bucket with optional public access, CORS, and versioning.
 
 ```typescript
-const bucket = new sst.aws.Bucket("RunwayAssets", {
+const bucket = new sst.aws.Bucket("RunwayDeliverables", {
   // Public bucket (for public assets — be intentional)
   public: false,  // default false
 
@@ -269,7 +269,7 @@ const bucket = new sst.aws.Bucket("RunwayAssets", {
 
 In Lambda:
 ```typescript
-Resource.RunwayAssets.name  // Bucket name
+Resource.RunwayDeliverables.name  // Bucket name
 ```
 
 ---
@@ -526,7 +526,7 @@ import { Resource } from "sst";
 Resource.RunwayTable.name    // DynamoDB table name
 Resource.RunwayBus.name      // EventBridge bus name
 Resource.EmailQueue.url      // SQS queue URL
-Resource.RunwayAssets.name   // S3 bucket name
+Resource.RunwayDeliverables.name   // S3 bucket name
 Resource.RunwayDb.host       // Aurora host
 Resource.MailgunApiKey.value // Secret value (SSM Parameter Store)
 ```
