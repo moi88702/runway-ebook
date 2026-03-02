@@ -24,17 +24,25 @@ The `aws-lambda` package (included in the Lambda Node.js runtime) exports typed 
 npm install --save-dev @types/aws-lambda
 ```
 
-Here are the handler types you'll use in Runway:
+Here are the handler types you'll use in Runway. Three are complete handler signatures (event + context → response); two are the underlying event and result types for when you want to annotate function arguments directly.
+
+- `APIGatewayProxyHandlerV2` — HTTP API (API Gateway v2), the one you'll use most
+- `APIGatewayProxyHandler` — REST API (API Gateway v1), avoid this
+- `SQSHandler` — SQS queue consumer
+- `ScheduledHandler` — EventBridge cron rule
+- `S3Handler` — S3 object created/deleted trigger
+- `APIGatewayProxyEventV2` — event type for HTTP API, for direct use in signatures
+- `APIGatewayProxyResultV2` — return type for HTTP API
 
 ```typescript
 import type {
-  APIGatewayProxyHandlerV2,        // HTTP API (API Gateway v2) — use this
-  APIGatewayProxyHandler,           // REST API (API Gateway v1) — avoid this
-  SQSHandler,                       // SQS queue consumer
-  ScheduledHandler,                 // EventBridge scheduled rule (cron)
-  S3Handler,                        // S3 event trigger
-  APIGatewayProxyEventV2,          // The event type for HTTP API
-  APIGatewayProxyResultV2,         // The return type for HTTP API
+  APIGatewayProxyHandlerV2,
+  APIGatewayProxyHandler,
+  SQSHandler,
+  ScheduledHandler,
+  S3Handler,
+  APIGatewayProxyEventV2,
+  APIGatewayProxyResultV2,
 } from "aws-lambda";
 ```
 
@@ -44,19 +52,12 @@ In this book we always use API Gateway v2 (HTTP API). It's cheaper, faster, simp
 
 ### What each type looks like
 
+**HTTP API handler**
+
+The event gives you `body` (string or null), `pathParameters`, `queryStringParameters`, and `headers` — all records with string keys. Access the HTTP method via `event.requestContext.http.method`. From context you'll most often use `context.awsRequestId` (a unique invocation UUID, log this with every request) and `context.getRemainingTimeInMillis()`.
+
 ```typescript
-// HTTP API handler — the one you'll write most often
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
-  // event.body is string | null | undefined
-  // event.pathParameters is Record<string, string | undefined> | undefined
-  // event.queryStringParameters is Record<string, string | undefined> | undefined
-  // event.headers is Record<string, string | undefined>
-  // event.requestContext.http.method is "GET" | "POST" | "PUT" | etc.
-
-  // context.requestId — the unique ID for this invocation
-  // context.functionName — the Lambda function name
-  // context.getRemainingTimeInMillis() — time until Lambda times out
-
   return {
     statusCode: 200,
     body: JSON.stringify({ ok: true }),
@@ -64,33 +65,34 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
+**SQS consumer**
+
+`event.Records` is an array of messages. Each `record.body` is the raw message string — JSON.parse it to get your payload. SQS handlers return void, not an HTTP response. To reject a message and send it to the DLQ after retries, throw an error.
+
 ```typescript
-// SQS consumer — processes messages from a queue
 export const handler: SQSHandler = async (event, context) => {
-  // event.Records is an array of SQS messages
   for (const record of event.Records) {
-    // record.body is the raw message string
     const message = JSON.parse(record.body);
     // process message...
   }
-  // Return void — SQS handlers don't return HTTP responses
-  // Throw an error to NACK the message (send to DLQ after retries)
 };
 ```
 
+**Scheduled handler**
+
+Triggered by an EventBridge rule on a cron schedule. `event.source` is always `"aws.events"`, `event["detail-type"]` is `"Scheduled Event"`, and `event.time` is the scheduled fire time as an ISO string.
+
 ```typescript
-// Scheduled handler — triggered by EventBridge cron
 export const handler: ScheduledHandler = async (event, context) => {
-  // event.source === "aws.events"
-  // event.detail-type === "Scheduled Event"
-  // event.time is the scheduled time as ISO string
-
-  // Run your scheduled job logic here
+  // your scheduled job logic here
 };
 ```
 
+**S3 event handler**
+
+Triggered when an object is created or deleted in a linked bucket. Each record gives you the bucket name and object key. Always decode the key — S3 URL-encodes special characters and replaces spaces with `+`.
+
 ```typescript
-// S3 event handler — triggered when an object is created/deleted
 export const handler: S3Handler = async (event, context) => {
   for (const record of event.Records) {
     const bucket = record.s3.bucket.name;
@@ -111,7 +113,6 @@ Always include `context` in your handler signature. You might not use it in ever
 ```typescript
 export const handler: SQSHandler = async (event, context) => {
   for (const record of event.Records) {
-    // Stop processing if we have less than 5 seconds left
     if (context.getRemainingTimeInMillis() < 5000) {
       break;
     }
@@ -129,15 +130,13 @@ When you use `APIGatewayProxyHandlerV2`, TypeScript knows all three pieces. If y
 
 ### Runway's first real handlers
 
-Let's look at what the workspace and invoice handlers look like with proper typing. We'll fill in the business logic as the chapter progresses, but the signatures are the foundation:
+Let's look at what the workspace and invoice handlers look like with proper typing. We'll fill in the business logic as the chapter progresses, but the signatures are the foundation. Authentication comes in Chapter 7 — for now these stubs just return empty responses.
 
 ```typescript
 // src/functions/workspaces/list.ts
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
 
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
-  // List all workspaces for the authenticated user
-  // (Authentication comes in Chapter 7 — for now we'll read from headers)
   return {
     statusCode: 200,
     headers: { "Content-Type": "application/json" },
@@ -146,12 +145,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
+The invoice create handler parses the body now but doesn't validate or persist anything yet — those layers come later in the chapter.
+
 ```typescript
 // src/functions/invoices/create.ts
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
 
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
-  // Parse request body, validate it, create invoice
   const body = event.body ? JSON.parse(event.body) : {};
 
   return {
@@ -162,7 +162,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
-Right now these don't do anything useful. By the end of this chapter, they'll have proper response helpers, structured logging, error handling, and environment validation. We'll build each layer.
+By the end of this chapter they'll have proper response helpers, structured logging, error handling, and environment validation. We'll build each layer.
 
 ### A note on file structure
 
@@ -223,6 +223,8 @@ The fix is a response library. Write it once, use it everywhere.
 
 ### Building the response library
 
+Start with the `ApiResponse` shape and a private `json` helper that handles the boilerplate every response needs — status code, Content-Type header, and stringified body.
+
 ```typescript
 // src/lib/response.ts
 
@@ -234,13 +236,14 @@ export type ApiResponse = {
 
 const json = (statusCode: number, body: unknown): ApiResponse => ({
   statusCode,
-  headers: {
-    "Content-Type": "application/json",
-  },
+  headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
+```
 
-// Success responses
+The success helpers wrap their data in a `{ data }` envelope, keeping the response shape consistent whether you're returning a single resource or a list.
+
+```typescript
 export const ok = <T>(data: T): ApiResponse =>
   json(200, { data });
 
@@ -252,66 +255,36 @@ export const noContent = (): ApiResponse => ({
   headers: {},
   body: "",
 });
+```
 
-// Error responses
+The error helpers each embed a `code` (machine-readable, safe to switch on in client code) and a `message` (human-readable). `badRequest` and `unprocessable` accept an optional `details` field for validation errors — we'll use that in Chapter 3 to forward Zod's issue list to the client.
+
+```typescript
 export const badRequest = (message: string, details?: unknown): ApiResponse =>
-  json(400, {
-    error: {
-      code: "BAD_REQUEST",
-      message,
-      ...(details !== undefined && { details }),
-    },
-  });
+  json(400, { error: { code: "BAD_REQUEST", message, ...(details !== undefined && { details }) } });
 
 export const unauthorized = (message = "Unauthorized"): ApiResponse =>
-  json(401, {
-    error: {
-      code: "UNAUTHORIZED",
-      message,
-    },
-  });
+  json(401, { error: { code: "UNAUTHORIZED", message } });
 
 export const forbidden = (message = "Forbidden"): ApiResponse =>
-  json(403, {
-    error: {
-      code: "FORBIDDEN",
-      message,
-    },
-  });
+  json(403, { error: { code: "FORBIDDEN", message } });
 
 export const notFound = (resource: string): ApiResponse =>
-  json(404, {
-    error: {
-      code: "NOT_FOUND",
-      message: `${resource} not found`,
-    },
-  });
+  json(404, { error: { code: "NOT_FOUND", message: `${resource} not found` } });
 
 export const conflict = (message: string): ApiResponse =>
-  json(409, {
-    error: {
-      code: "CONFLICT",
-      message,
-    },
-  });
+  json(409, { error: { code: "CONFLICT", message } });
 
 export const unprocessable = (message: string, details?: unknown): ApiResponse =>
-  json(422, {
-    error: {
-      code: "UNPROCESSABLE",
-      message,
-      ...(details !== undefined && { details }),
-    },
-  });
+  json(422, { error: { code: "UNPROCESSABLE", message, ...(details !== undefined && { details }) } });
 
 export const internalError = (message = "Internal server error"): ApiResponse =>
-  json(500, {
-    error: {
-      code: "INTERNAL_ERROR",
-      message,
-    },
-  });
+  json(500, { error: { code: "INTERNAL_ERROR", message } });
+```
 
+Finally, collect them all into a single `res` object so handlers import one thing and call everything through it.
+
+```typescript
 export const res = {
   ok,
   created,
@@ -387,9 +360,9 @@ People misuse status codes constantly. Here's the Runway policy:
 
 The 401/403 distinction matters: 401 means "I don't know who you are", 403 means "I know who you are, and you can't do this." In practice, for resources that belong to other users, you often want 404 rather than 403 — returning 403 tells an attacker that the resource exists.
 
-One misuse that's rampant in the wild: using 200 with a success field in the body:
+One misuse that's rampant in the wild: using 200 with a success field in the body. Don't do this:
+
 ```json
-// Do NOT do this
 { "success": false, "error": "Something went wrong" }
 ```
 
@@ -416,11 +389,12 @@ export type WorkspaceList = {
 };
 ```
 
+TypeScript infers the body shape from the argument — if you pass the wrong type to `res.ok()`, it's a compile error rather than a runtime surprise.
+
 ```typescript
-// Handler with typed response
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const result: WorkspaceList = await workspaceService.list(ownerId);
-  return res.ok(result); // TypeScript knows the body shape
+  return res.ok(result);
 };
 ```
 
@@ -498,6 +472,8 @@ On the first invocation (warm or cold), `getClient()` initialises the client and
 
 Here's the full implementation for Runway's DynamoDB client:
 
+The file re-exports all the command types that services will need. This means nothing outside `lib/db/` ever imports directly from the AWS SDK — keeping the SDK version a detail only this file needs to know about.
+
 ```typescript
 // src/lib/db/dynamodb.ts
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -511,7 +487,6 @@ import {
   TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 
-// Re-export command types so services don't import from the SDK directly
 export {
   GetCommand,
   PutCommand,
@@ -520,7 +495,11 @@ export {
   QueryCommand,
   TransactWriteCommand,
 };
+```
 
+The client uses the Document Client wrapper, which handles DynamoDB's type marshalling automatically. Three options are set deliberately: `maxAttempts: 3` caps SDK retries to keep cold start time predictable rather than letting the SDK spin through its default backoff. `removeUndefinedValues: true` prevents undefined fields from being written as `NULL` — you want the attribute absent, not null. `wrapNumbers: false` returns numbers as native JS numbers rather than wrapped `NumberValue` objects.
+
+```typescript
 let _client: DynamoDBDocumentClient | undefined;
 
 export const getDb = (): DynamoDBDocumentClient => {
@@ -528,19 +507,15 @@ export const getDb = (): DynamoDBDocumentClient => {
 
   const base = new DynamoDBClient({
     region: process.env.AWS_REGION,
-    // Reduce cold start time: limit retries during initialisation
     maxAttempts: 3,
   });
 
   _client = DynamoDBDocumentClient.from(base, {
     marshallOptions: {
-      // Remove undefined values instead of setting to NULL
       removeUndefinedValues: true,
-      // Convert Date objects to ISO strings
       convertClassInstanceToMap: false,
     },
     unmarshallOptions: {
-      // Numbers come back as native numbers, not strings
       wrapNumbers: false,
     },
   });
@@ -619,7 +594,6 @@ If you do add it, here's how in SST:
 // sst.config.ts
 api.route("GET /invoices", {
   handler: "src/functions/invoices/list.handler",
-  // Only provision concurrency in production
   ...(isProd && {
     warmup: { minConcurrency: 2 },
   }),
@@ -656,18 +630,15 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const log = logger.child({ requestId: context.awsRequestId });
 
   try {
-    // 1. Extract inputs
     const workspaceId = event.pathParameters?.workspaceId;
     if (!workspaceId) return res.badRequest("Missing workspaceId");
 
     const body = event.body ? JSON.parse(event.body) : {};
 
-    // 2. Call service (validation is here for now, moves to middleware in Ch. 3)
     const invoice = await invoiceService.create(workspaceId, body);
 
     log.info("Invoice created", { invoiceId: invoice.id, workspaceId });
 
-    // 3. Return response
     return res.created(invoice);
   } catch (err) {
     if (err instanceof AppError) {
@@ -679,8 +650,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
+The service has no Lambda types anywhere — just domain objects and business logic.
+
 ```typescript
-// src/services/invoices.ts  — the service
+// src/services/invoices.ts
 import { nanoid } from "nanoid";
 import { getDb, PutCommand, QueryCommand } from "../lib/db/dynamodb";
 import { AppError } from "../lib/errors";
@@ -688,13 +661,14 @@ import { getConfig } from "../lib/config";
 import type { Invoice, CreateInvoiceInput } from "../types/invoice";
 
 const config = getConfig();
+```
 
+Invoice creation starts by fetching a human-readable invoice number (e.g. `INV-0042`) from a DynamoDB counter, then building the full invoice object. Tax is calculated at 20% (UK VAT) and totalled after the object is constructed so the field ordering stays readable.
+
+```typescript
 export const invoiceService = {
   async create(workspaceId: string, input: CreateInvoiceInput): Promise<Invoice> {
-    // Business logic here — no Lambda, no HTTP, no event shapes
     const db = getDb();
-
-    // Generate a human-readable invoice number
     const invoiceNumber = await generateInvoiceNumber(workspaceId);
 
     const invoice: Invoice = {
@@ -715,9 +689,13 @@ export const invoiceService = {
       updatedAt: new Date().toISOString(),
     };
 
-    invoice.tax = Math.round(invoice.subtotal * 0.2); // 20% VAT for UK
+    invoice.tax = Math.round(invoice.subtotal * 0.2);
     invoice.total = invoice.subtotal + invoice.tax;
+```
 
+The `ConditionExpression: "attribute_not_exists(pk)"` makes the write conditional — DynamoDB rejects it if an item with that partition key already exists. This prevents two concurrent requests from writing duplicate invoices with the same generated ID.
+
+```typescript
     await db.send(
       new PutCommand({
         TableName: config.TABLE_NAME,
@@ -727,7 +705,6 @@ export const invoiceService = {
           ...invoice,
           type: "INVOICE",
         },
-        // Prevent overwriting an existing invoice
         ConditionExpression: "attribute_not_exists(pk)",
       })
     );
@@ -747,10 +724,12 @@ export const invoiceService = {
     return [];
   },
 };
+```
 
+`generateInvoiceNumber` queries DynamoDB for the workspace's current invoice counter and atomically increments it, returning a padded string in `INV-NNNN` format. We'll implement it properly in Chapter 4 once the DynamoDB schema is in place — for now it returns a placeholder.
+
+```typescript
 async function generateInvoiceNumber(workspaceId: string): Promise<string> {
-  // Implementation — queries DynamoDB for the last invoice number
-  // and increments it. Returns "INV-0001" format.
   return "INV-0001";
 }
 ```
@@ -983,7 +962,6 @@ const createLogger = (baseContext: LogContext = {}): Logger => {
       ...context,
     };
 
-    // CloudWatch picks these up correctly when written to stdout
     const output = JSON.stringify(entry);
     if (level === "error" || level === "warn") {
       process.stderr.write(output + "\n");
@@ -1001,7 +979,6 @@ const createLogger = (baseContext: LogContext = {}): Logger => {
   };
 };
 
-// Base logger — used at module level
 export const logger = createLogger({
   service: "runway-api",
   stage: process.env.SST_STAGE ?? "unknown",
@@ -1158,6 +1135,8 @@ The fix is a small error class hierarchy and a single wrapper pattern.
 
 ### Custom error classes
 
+The `ErrorCode` union has two tiers: generic HTTP-level codes that map directly to status codes, and domain-specific codes that describe Runway business rules. The domain codes let services throw precise errors (`INVOICE_ALREADY_SENT`) while the handler maps them to the right HTTP status automatically.
+
 ```typescript
 // src/lib/errors.ts
 
@@ -1169,7 +1148,6 @@ export type ErrorCode =
   | "CONFLICT"
   | "UNPROCESSABLE"
   | "INTERNAL_ERROR"
-  // Domain-specific error codes
   | "WORKSPACE_NOT_FOUND"
   | "CLIENT_NOT_FOUND"
   | "PROJECT_NOT_FOUND"
@@ -1178,7 +1156,11 @@ export type ErrorCode =
   | "INVOICE_ALREADY_PAID"
   | "WORKSPACE_LIMIT_REACHED"
   | "DUPLICATE_INVOICE_NUMBER";
+```
 
+`AppError` extends the built-in `Error`. The `Object.setPrototypeOf` call is required when extending built-in classes in TypeScript — without it, `instanceof AppError` returns false after the class is transpiled to ES5, breaking the catch blocks that rely on it.
+
+```typescript
 export class AppError extends Error {
   readonly code: ErrorCode;
   readonly statusCode: number;
@@ -1194,13 +1176,14 @@ export class AppError extends Error {
     this.code = code;
     this.statusCode = options?.statusCode ?? statusCodeForErrorCode(code);
     this.details = options?.details;
-
-    // Maintains proper prototype chain for instanceof checks
     Object.setPrototypeOf(this, AppError.prototype);
   }
 }
+```
 
-// Map error codes to sensible default HTTP status codes
+Each `ErrorCode` maps to a default HTTP status. Domain codes that represent "this thing doesn't exist" map to 404; state conflicts (already sent, already paid) map to 409. The handler never needs to think about which status code goes with which business error.
+
+```typescript
 function statusCodeForErrorCode(code: ErrorCode): number {
   const map: Record<ErrorCode, number> = {
     BAD_REQUEST: 400,
@@ -1221,15 +1204,17 @@ function statusCodeForErrorCode(code: ErrorCode): number {
   };
   return map[code] ?? 500;
 }
+```
 
-// Convenience factory functions — keeps service code readable
+The factory functions are the public API services use. They read like English in service code (`throw errors.invoiceAlreadySent(id)`) and keep the `AppError` constructor details out of every call site.
+
+```typescript
 export const errors = {
   badRequest: (message: string, details?: unknown) =>
     new AppError("BAD_REQUEST", message, { details }),
 
   notFound: (resource: string) =>
-    new AppError(`${resource.toUpperCase()}_NOT_FOUND` as ErrorCode,
-      `${resource} not found`),
+    new AppError(`${resource.toUpperCase()}_NOT_FOUND` as ErrorCode, `${resource} not found`),
 
   workspaceNotFound: (workspaceId: string) =>
     new AppError("WORKSPACE_NOT_FOUND", `Workspace ${workspaceId} not found`),
@@ -1241,16 +1226,13 @@ export const errors = {
     new AppError("INVOICE_NOT_FOUND", `Invoice ${invoiceId} not found`),
 
   invoiceAlreadySent: (invoiceId: string) =>
-    new AppError("INVOICE_ALREADY_SENT",
-      `Invoice ${invoiceId} has already been sent and cannot be modified`),
+    new AppError("INVOICE_ALREADY_SENT", `Invoice ${invoiceId} has already been sent and cannot be modified`),
 
   invoiceAlreadyPaid: (invoiceId: string) =>
-    new AppError("INVOICE_ALREADY_PAID",
-      `Invoice ${invoiceId} has already been paid`),
+    new AppError("INVOICE_ALREADY_PAID", `Invoice ${invoiceId} has already been paid`),
 
   workspaceLimitReached: () =>
-    new AppError("WORKSPACE_LIMIT_REACHED",
-      "You have reached the workspace limit for your plan. Upgrade to add more workspaces."),
+    new AppError("WORKSPACE_LIMIT_REACHED", "You have reached the workspace limit for your plan. Upgrade to add more workspaces."),
 
   forbidden: (message = "You do not have permission to perform this action") =>
     new AppError("FORBIDDEN", message),
@@ -1268,12 +1250,12 @@ export const errors = {
 
 Now extend the response library to handle `AppError`:
 
+Add `fromAppError` to `response.ts` — it reads the status code, error code, and details directly off the `AppError` instance so handlers never have to unpack it manually.
+
 ```typescript
 // src/lib/response.ts  — add this to the existing file
-
 import { AppError } from "./errors";
 
-// Add to the response library
 export const fromAppError = (err: AppError): ApiResponse =>
   json(err.statusCode, {
     error: {
@@ -1282,8 +1264,11 @@ export const fromAppError = (err: AppError): ApiResponse =>
       ...(err.details !== undefined && { details: err.details }),
     },
   });
+```
 
-// Update res object to include fromAppError
+Update the `res` export to include it:
+
+```typescript
 export const res = {
   ok,
   created,
@@ -1332,7 +1317,6 @@ export const invoiceService = {
       throw errors.badRequest("Cannot send a cancelled invoice");
     }
 
-    // Send the invoice email...
     log.info("Sending invoice email", { invoiceId, clientId: invoice.clientId });
 
     const updated = await invoiceService.update(workspaceId, invoiceId, {
@@ -1348,7 +1332,7 @@ The service throws typed errors. The handler catches them and maps to HTTP respo
 
 ### The handler-level try/catch pattern
 
-Every handler needs a try/catch. Every single one. Here's the canonical pattern:
+Every handler needs a try/catch. Every single one. The catch block has three tiers: JSON parse errors from a malformed body, `AppError` instances thrown by services (expected failures), and everything else (bugs). `AppError`s with a 5xx status are genuine problems — log them as errors. 4xx errors are expected business outcomes — log them as warnings to avoid noise. Anything that reaches tier three is a bug: log the full stack trace and return a generic 500.
 
 ```typescript
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
@@ -1358,16 +1342,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     // ... handler logic
 
   } catch (err) {
-    // 1. Handle JSON parse errors
     if (err instanceof SyntaxError && err.message.includes("JSON")) {
       log.warn("Invalid JSON in request body");
       return res.badRequest("Request body is not valid JSON");
     }
 
-    // 2. Handle our own errors
     if (err instanceof AppError) {
-      // Only log warn for expected errors (not found, forbidden, etc.)
-      // Errors that indicate a bug get logged as error
       if (err.statusCode >= 500) {
         log.error("Application error", { code: err.code, err: err.message });
       } else {
@@ -1376,7 +1356,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       return res.fromAppError(err);
     }
 
-    // 3. Everything else is unexpected — log it fully
     log.error("Unhandled error", {
       err: err instanceof Error ? {
         name: err.name,
@@ -1390,7 +1369,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
-Tier 3 (unhandled) is where bugs live. Every time something hits tier 3, it's a signal: either add handling for this error type, or fix the underlying bug.
+Every time something hits the unhandled tier, it's a signal: either add handling for this error type, or fix the underlying bug.
 
 ### Never silently swallow errors
 
@@ -1462,14 +1441,13 @@ export const workspaceService = {
           sk: `WORKSPACE#${workspace.id}`,
           ...workspace,
         },
-        // Fail if a workspace with this slug already exists
         ConditionExpression: "attribute_not_exists(pk)",
       }));
     } catch (err) {
       if (isConditionalCheckFailed(err)) {
         throw errors.conflict(`A workspace with slug "${input.slug}" already exists`);
       }
-      throw err; // Re-throw unexpected DynamoDB errors
+      throw err;
     }
 
     return workspace;
@@ -1540,7 +1518,6 @@ export const getConfig = (): Config => {
   };
 
   if (errors.length > 0) {
-    // This fails at startup — before any invocation completes
     throw new Error(
       `Lambda configuration error:\n${errors.map(e => `  - ${e}`).join("\n")}`
     );
@@ -1557,12 +1534,10 @@ Call `getConfig()` at the module level in services (not inside the handler funct
 // src/services/invoices.ts
 import { getConfig } from "../lib/config";
 
-// Called once at module load time — fails fast if config is missing
 const config = getConfig();
 
 export const invoiceService = {
   async create(...) {
-    // config.TABLE_NAME is guaranteed to exist here
     await db.send(new PutCommand({ TableName: config.TABLE_NAME, ... }));
   },
 };
@@ -1574,25 +1549,31 @@ If `TABLE_NAME` is missing, the Lambda fails during initialisation — before th
 
 SST's resource linking handles most environment variables automatically. But some things — like your app URL and SES sender address — need to be set explicitly:
 
+The DynamoDB table uses resource linking — SST injects `TABLE_NAME` automatically, no manual environment variable needed. The S3 buckets are declared here ahead of their full implementation in Chapter 6 so functions can be linked to them now.
+
 ```typescript
 // sst.config.ts
 const api = new sst.aws.ApiGatewayV2("RunwayApi");
 
-// DynamoDB table — linked via resource linking (TABLE_NAME injected automatically)
 const table = new sst.aws.Dynamo("RunwayTable", {
   fields: { pk: "string", sk: "string" },
   primaryIndex: { hashKey: "pk", rangeKey: "sk" },
 });
 
-// S3 buckets — full setup in Chapter 6; defined here so functions can be linked
 const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
 const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
+```
 
-// Secrets — set via `npx sst secret set`
+Secrets are set per-stage with `npx sst secret set` and injected via resource linking — they never touch source code or `.env` files.
+
+```typescript
 const stripeSecretKey = new sst.Secret("StripeSecretKey");
 const stripeWebhookSecret = new sst.Secret("StripeWebhookSecret");
+```
 
-// Register routes with the right environment
+Rather than repeating the `link` and `environment` config on every route, collect it into a shared object and spread it. All Lambda functions in Runway get the same set of linked resources and environment variables.
+
+```typescript
 const functionConfig = {
   link: [table, deliverablesBucket, invoicesBucket, stripeSecretKey, stripeWebhookSecret],
   environment: {
@@ -1680,7 +1661,6 @@ Note the coverage exclusion: we exclude `src/functions/` from coverage because h
 
 ```typescript
 // src/test/setup.ts
-// Set required environment variables for tests
 process.env.TABLE_NAME = "runway-test-table";
 process.env.STRIPE_SECRET_KEY = "sk_test_fake";
 process.env.STRIPE_WEBHOOK_SECRET = "whsec_fake";
@@ -1689,12 +1669,14 @@ process.env.INVOICE_BUCKET_NAME = "runway-test-bucket";
 process.env.APP_URL = "http://localhost:3000";
 process.env.SST_STAGE = "test";
 process.env.NODE_ENV = "test";
-process.env.LOG_LEVEL = "error"; // Suppress logs during tests
+process.env.LOG_LEVEL = "error";
 ```
 
 ### Unit testing services
 
 Service layer tests are pure TypeScript unit tests. You mock the database and external services, and test the business logic:
+
+The database module is mocked entirely — `getDb` returns a fake client. The logger mock silences all output and exposes spies if assertions are needed against log calls.
 
 ```typescript
 // src/services/__tests__/invoices.test.ts
@@ -1703,7 +1685,6 @@ import { invoiceService } from "../invoices";
 import { errors } from "../../lib/errors";
 import { getDb } from "../../lib/db/dynamodb";
 
-// Mock the database client
 vi.mock("../../lib/db/dynamodb", () => ({
   getDb: vi.fn(),
   PutCommand: vi.fn((args) => args),
@@ -1712,16 +1693,10 @@ vi.mock("../../lib/db/dynamodb", () => ({
   UpdateCommand: vi.fn((args) => args),
 }));
 
-const mockDb = {
-  send: vi.fn(),
-};
+const mockDb = { send: vi.fn() };
 
-// Silent logger for tests
 const mockLog = {
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
+  debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
   child: vi.fn().mockReturnThis(),
 };
 
@@ -1729,19 +1704,18 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getDb).mockReturnValue(mockDb as any);
 });
+```
 
+The `create` tests cover totals calculation, invoice number format, timestamp bounds, and the duplicate-ID conflict path. Amounts are in pence throughout.
+
+```typescript
 describe("invoiceService.create", () => {
   const workspaceId = "ws_test123";
 
   const validInput = {
     clientId: "cli_test456",
     lineItems: [
-      {
-        description: "Website redesign",
-        quantity: 1,
-        unitPrice: 5000_00, // pence
-        amount: 5000_00,
-      },
+      { description: "Website redesign", quantity: 1, unitPrice: 500_000, amount: 500_000 },
     ],
     currency: "GBP",
     issueDate: "2025-03-01",
@@ -1750,32 +1724,24 @@ describe("invoiceService.create", () => {
 
   it("creates an invoice with correct totals", async () => {
     mockDb.send.mockResolvedValue({});
-
     const invoice = await invoiceService.create(workspaceId, validInput, mockLog as any);
-
     expect(invoice.subtotal).toBe(500_000);
-    expect(invoice.tax).toBe(100_000); // 20% VAT
+    expect(invoice.tax).toBe(100_000);
     expect(invoice.total).toBe(600_000);
     expect(invoice.status).toBe("draft");
-    expect(invoice.workspaceId).toBe(workspaceId);
-    expect(invoice.clientId).toBe(validInput.clientId);
   });
 
   it("generates an invoice number", async () => {
     mockDb.send.mockResolvedValue({});
-
     const invoice = await invoiceService.create(workspaceId, validInput, mockLog as any);
-
     expect(invoice.invoiceNumber).toMatch(/^INV-\d{4}$/);
   });
 
   it("sets correct timestamps", async () => {
     mockDb.send.mockResolvedValue({});
-
     const before = new Date();
     const invoice = await invoiceService.create(workspaceId, validInput, mockLog as any);
     const after = new Date();
-
     const createdAt = new Date(invoice.createdAt);
     expect(createdAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
     expect(createdAt.getTime()).toBeLessThanOrEqual(after.getTime());
@@ -1784,59 +1750,40 @@ describe("invoiceService.create", () => {
   it("throws conflict when invoice already exists", async () => {
     const { ConditionalCheckFailedException } = await import("@aws-sdk/client-dynamodb");
     mockDb.send.mockRejectedValue(new ConditionalCheckFailedException({ message: "", $metadata: {} }));
-
     await expect(
       invoiceService.create(workspaceId, validInput, mockLog as any)
-    ).rejects.toMatchObject({
-      code: "CONFLICT",
-    });
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
+```
 
+The `send` tests verify that the service throws the right domain error codes for each invalid state transition — not-found, already-sent, already-paid.
+
+```typescript
 describe("invoiceService.send", () => {
   const workspaceId = "ws_test123";
   const invoiceId = "inv_test789";
-
-  const draftInvoice = {
-    id: invoiceId,
-    workspaceId,
-    status: "draft",
-    clientId: "cli_test456",
-    // ... other fields
-  };
+  const draftInvoice = { id: invoiceId, workspaceId, status: "draft", clientId: "cli_test456" };
 
   it("throws NOT_FOUND when invoice does not exist", async () => {
     mockDb.send.mockResolvedValue({ Item: undefined });
-
     await expect(
       invoiceService.send(workspaceId, invoiceId, mockLog as any)
-    ).rejects.toMatchObject({
-      code: "INVOICE_NOT_FOUND",
-    });
+    ).rejects.toMatchObject({ code: "INVOICE_NOT_FOUND" });
   });
 
   it("throws INVOICE_ALREADY_SENT when invoice is already sent", async () => {
-    mockDb.send.mockResolvedValue({
-      Item: { ...draftInvoice, status: "sent" },
-    });
-
+    mockDb.send.mockResolvedValue({ Item: { ...draftInvoice, status: "sent" } });
     await expect(
       invoiceService.send(workspaceId, invoiceId, mockLog as any)
-    ).rejects.toMatchObject({
-      code: "INVOICE_ALREADY_SENT",
-    });
+    ).rejects.toMatchObject({ code: "INVOICE_ALREADY_SENT" });
   });
 
   it("throws INVOICE_ALREADY_PAID when invoice is paid", async () => {
-    mockDb.send.mockResolvedValue({
-      Item: { ...draftInvoice, status: "paid" },
-    });
-
+    mockDb.send.mockResolvedValue({ Item: { ...draftInvoice, status: "paid" } });
     await expect(
       invoiceService.send(workspaceId, invoiceId, mockLog as any)
-    ).rejects.toMatchObject({
-      code: "INVOICE_ALREADY_PAID",
-    });
+    ).rejects.toMatchObject({ code: "INVOICE_ALREADY_PAID" });
   });
 });
 ```
@@ -2016,7 +1963,6 @@ describe("POST /workspaces/{workspaceId}/invoices", () => {
     const event = mockApiEvent({
       method: "POST",
       path: "/workspaces//invoices",
-      // No pathParameters
     });
 
     const result = await handler(event, mockContext(), () => {});
@@ -2081,7 +2027,6 @@ describe("POST /workspaces/{workspaceId}/invoices", () => {
       path: `/workspaces/${workspaceId}/invoices`,
       pathParameters: { workspaceId },
     });
-    // Manually override body with invalid JSON
     event.body = "{ this is not json }";
 
     const result = await handler(event, mockContext(), () => {});
@@ -2105,13 +2050,12 @@ describe("POST /workspaces/{workspaceId}/invoices", () => {
 
 **Test against real AWS** for integration tests using `sst dev`. SST's live development environment means your integration tests can call the real API Gateway URL, which routes to your local handler, which talks to the real DynamoDB table. No LocalStack, no complex mocking of AWS responses. This is the right place to verify the full stack:
 
+Run these with `sst dev` active in another terminal (`API_URL=$(npx sst dev --print-url) vitest --run integration`). The `API_URL` environment variable comes from SST's dev output.
+
 ```typescript
 // src/test/integration/invoices.integration.test.ts
-// Run with: npx sst dev (in another terminal), then vitest --run integration
-
 import { describe, it, expect } from "vitest";
 
-// The API URL is set by sst dev output
 const API_URL = process.env.API_URL ?? "http://localhost:3000";
 
 describe("Invoice API (integration)", () => {
@@ -2160,7 +2104,6 @@ import { AppError } from "../../lib/errors";
 import { invoiceService } from "../../services/invoices";
 
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
-  // Child logger with request context baked in
   const log = logger.child({
     requestId: context.awsRequestId,
     function: context.functionName,
@@ -2171,14 +2114,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   log.info("Request received");
 
   try {
-    // Extract path parameters
     const workspaceId = event.pathParameters?.workspaceId;
     if (!workspaceId) {
       log.warn("Missing workspaceId");
       return res.badRequest("workspaceId path parameter is required");
     }
 
-    // Parse request body
     let body: unknown;
     try {
       body = event.body ? JSON.parse(event.body) : {};
@@ -2187,7 +2128,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       return res.badRequest("Request body must be valid JSON");
     }
 
-    // Call service (full validation moves to middleware in Chapter 3)
     const invoice = await invoiceService.create(workspaceId, body as any, log);
 
     log.info("Invoice created", {
@@ -2254,7 +2194,6 @@ export default $config({
       primaryIndex: { hashKey: "pk", rangeKey: "sk" },
     });
 
-    // S3 buckets — full setup in Chapter 6; defined here so functions can be linked
     const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
     const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
 
@@ -2271,12 +2210,10 @@ export default $config({
         SES_FROM_ADDRESS: "invoices@runway.so",
         LOG_LEVEL: isProd ? "info" : "debug",
       },
-      // Tune Lambda settings
       memory: "512 MB",
       timeout: "30 seconds",
     } as const;
 
-    // Health check (from Chapter 1)
     api.route("GET /health", {
       handler: "src/functions/health.handler",
     });
