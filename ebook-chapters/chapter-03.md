@@ -230,18 +230,16 @@ The TypeScript type is `Record<string, string | undefined>`, so any access can r
 
 ### Building an input extraction utility
 
-The pattern of extracting and coercing inputs is repetitive. A small utility makes handlers cleaner:
+The pattern of extracting and coercing inputs is repetitive. A small utility makes handlers cleaner. Create `src/lib/event.ts` and build it up function by function.
+
+**Parsing the request body**
+
+API Gateway can base64-encode the body (for binary payloads or certain content types). `parseBody` handles both cases, returning `undefined` for an empty body and letting `JSON.parse` throw naturally on malformed JSON — you'll catch that at the handler level and return a 400.
 
 ```typescript
 // src/lib/event.ts
-
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 
-/**
- * Safely parse the request body as JSON.
- * Returns undefined if body is absent or empty.
- * Throws SyntaxError if body is present but not valid JSON.
- */
 export const parseBody = (event: APIGatewayProxyEventV2): unknown => {
   if (!event.body) return undefined;
 
@@ -251,12 +249,13 @@ export const parseBody = (event: APIGatewayProxyEventV2): unknown => {
 
   return JSON.parse(raw); // throws SyntaxError on invalid JSON
 };
+```
 
-/**
- * Get a required path parameter.
- * Throws if the parameter is absent (shouldn't happen for matched routes,
- * but TypeScript doesn't know that).
- */
+**Requiring a path parameter**
+
+When a route matches `/invoices/:invoiceId`, API Gateway guarantees the parameter exists — but the TypeScript types say it could be `undefined`. `requirePathParam` narrows that to a `string` and throws with a clear message if the impossible happens. It also decodes URI encoding so handlers always get clean values.
+
+```typescript
 export const requirePathParam = (
   event: APIGatewayProxyEventV2,
   name: string
@@ -267,10 +266,13 @@ export const requirePathParam = (
   }
   return decodeURIComponent(value);
 };
+```
 
-/**
- * Get an optional path parameter (can be undefined).
- */
+**Getting an optional path parameter**
+
+Some routes use optional segments. `getPathParam` returns `string | undefined` without throwing, so you can branch on presence in the handler.
+
+```typescript
 export const getPathParam = (
   event: APIGatewayProxyEventV2,
   name: string
@@ -278,20 +280,26 @@ export const getPathParam = (
   const value = event.pathParameters?.[name];
   return value ? decodeURIComponent(value) : undefined;
 };
+```
 
-/**
- * Get a query string parameter.
- */
+**Reading a query string parameter**
+
+Query parameters are always strings (or absent). `getQuery` is a thin wrapper that makes the intent explicit and avoids optional chaining noise in every handler.
+
+```typescript
 export const getQuery = (
   event: APIGatewayProxyEventV2,
   name: string
 ): string | undefined => {
   return event.queryStringParameters?.[name];
 };
+```
 
-/**
- * Get multiple values for a query parameter (comma-separated).
- */
+**Reading a multi-value query parameter**
+
+For list filters like `?status=draft,sent`, `getQueryArray` splits on commas and filters empty strings, returning a clean `string[]`. If the parameter is absent it returns an empty array, so handlers can always safely iterate.
+
+```typescript
 export const getQueryArray = (
   event: APIGatewayProxyEventV2,
   name: string
@@ -313,7 +321,9 @@ npm install zod
 
 Zod is a TypeScript-first schema validation library. You define a schema, Zod validates data against it, and if validation fails, you get a structured error describing exactly what was wrong. The schema also serves as the TypeScript type — you write the shape once and get runtime validation and compile-time types for free.
 
-Here's the pitch in code:
+**Defining the schema**
+
+Each field gets a validator that describes exactly what's acceptable. Required strings need `.min(1)` or they'd pass on empty string. Line items are an array with `.min(1)` so you can't create an invoice with no items. Currency defaults to `"GBP"` if omitted. Dates are validated against a regex so garbage strings can't sneak through.
 
 ```typescript
 import { z } from "zod";
@@ -332,27 +342,35 @@ const CreateInvoiceSchema = z.object({
   dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD"),
   notes: z.string().max(2000).optional(),
 });
+```
 
-// The TypeScript type, derived from the schema — no duplication
+**Deriving the TypeScript type**
+
+`z.infer<>` extracts a TypeScript type directly from the schema. You never write the type separately — the schema is the single source of truth, and TypeScript figures out the rest. Optional fields become `string | undefined`, the currency enum becomes `"GBP" | "USD" | "EUR"`, and so on.
+
+```typescript
 type CreateInvoiceInput = z.infer<typeof CreateInvoiceSchema>;
+```
 
-// Validate some input
+**Validating input**
+
+`safeParse` never throws. It returns a discriminated union: either `{ success: true, data: CreateInvoiceInput }` or `{ success: false, error: ZodError }`. The error's `issues` array is structured — each entry has a `path` pointing to the offending field and a `message` describing the problem. That structure maps directly to what a frontend needs to show per-field errors.
+
+```typescript
 const result = CreateInvoiceSchema.safeParse(unknownBody);
 
 if (!result.success) {
-  // result.error.issues is an array of {path, message, code}
   console.log(result.error.issues);
   // [
   //   { path: ["clientId"], message: "Required", code: "invalid_type" },
   //   { path: ["lineItems", 0, "description"], message: "String must contain at least 1 character(s)", code: "too_small" }
   // ]
 } else {
-  // result.data is typed as CreateInvoiceInput
-  const input = result.data;
+  const input = result.data; // typed as CreateInvoiceInput
 }
 ```
 
-This is what we want: one source of truth (the schema), two outputs (runtime validation + TypeScript types), structured errors that a client can display field by field.
+One source of truth (the schema), two outputs (runtime validation + TypeScript types), structured errors that a client can display field by field.
 
 ### Zod schema patterns you'll use constantly
 
