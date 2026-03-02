@@ -217,12 +217,12 @@ api.route("GET /workspaces", {
 });
 ```
 
+In the function itself, `Resource` gives you typed access to everything linked to that function. `Resource.RunwayTable.name` is a fully typed string — TypeScript knows exactly what it is. The Lambda also gets DynamoDB read/write permissions wired up automatically; no IAM policy documents, no `process.env` wrangling.
+
 ```typescript
 // src/functions/workspaces.ts
 import { Resource } from "sst";
 
-// Resource.RunwayTable.name is fully typed
-// Lambda has DynamoDB read/write permissions automatically
 const tableName = Resource.RunwayTable.name;
 ```
 
@@ -313,42 +313,41 @@ Each stage is completely isolated in AWS. Different CloudFormation stacks, diffe
 
 ### Stage-specific configuration
 
-You already saw the `removal` property vary by stage. Here's how to do that for anything:
+You already saw the `removal` property vary by stage. Here's how to do that for anything. Derive a boolean at the top of `run()` and branch on it across your resource config — one comparison, used everywhere.
+
+`$app.stage` is SST's typed global for the current stage name. Use it anywhere in `sst.config.ts`.
 
 ```typescript
-export default $config({
-  app(input) {
-    return {
-      name: "runway",
-      removal: input?.stage === "production" ? "retain" : "remove",
-      home: "aws",
-    };
-  },
-  async run() {
-    const isProd = $app.stage === "production";
-
-    const api = new sst.aws.ApiGatewayV2("RunwayApi", {
-      // Only enable access logs in production (saves cost in dev)
-      accessLog: isProd
-        ? { retention: "1 month" }
-        : false,
-    });
-
-    const table = new sst.aws.Dynamo("RunwayTable", {
-      fields: { pk: "string", sk: "string" },
-      primaryIndex: { hashKey: "pk", rangeKey: "sk" },
-      // Scale down in non-production to save costs
-      ...(isProd && {
-        scaling: { min: 5, max: 100 },
-      }),
-    });
-
-    // ...
-  },
-});
+async run() {
+  const isProd = $app.stage === "production";
 ```
 
-`$app.stage` is SST's typed global for accessing the current stage name. Use it anywhere in `sst.config.ts` to branch on environment.
+**Access logs**
+
+CloudWatch access logs on API Gateway cost money. There's no reason to pay for them on dev or staging stages where you're already watching your terminal. Enable them only in production, and set a retention window so old logs don't accumulate indefinitely.
+
+```typescript
+  const api = new sst.aws.ApiGatewayV2("RunwayApi", {
+    accessLog: isProd
+      ? { retention: "1 month" }
+      : false,
+  });
+```
+
+**DynamoDB provisioned capacity**
+
+DynamoDB provisioned capacity has a minimum cost even when idle. Dev stages that sit unused overnight don't need it. The `...(isProd && { ... })` spread is the idiomatic way to conditionally include properties in an SST config object.
+
+```typescript
+  const table = new sst.aws.Dynamo("RunwayTable", {
+    fields: { pk: "string", sk: "string" },
+    primaryIndex: { hashKey: "pk", rangeKey: "sk" },
+    ...(isProd && {
+      scaling: { min: 5, max: 100 },
+    }),
+  });
+}
+```
 
 ### Environment variables across stages
 
