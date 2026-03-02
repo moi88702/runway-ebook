@@ -75,17 +75,17 @@ Sixteen access patterns. In a relational database, most of these are simple `SEL
 
 Runway has four core entities:
 
+The four core entities. `ownerId` is a Cognito user ID; Chapter 7 wires up the JWT extraction. All dates are ISO 8601 strings. `amountCents` is always an integer — never a float.
+
 ```typescript
-// The workspace is the top-level container — one per freelancer account
 type Workspace = {
   workspaceId: string;
   name: string;
-  ownerId: string;       // Cognito user ID, wired in Chapter 7
-  createdAt: string;     // ISO 8601
+  ownerId: string;
+  createdAt: string;
   updatedAt: string;
 };
 
-// A client belongs to a workspace
 type Client = {
   clientId: string;
   workspaceId: string;
@@ -96,7 +96,6 @@ type Client = {
   updatedAt: string;
 };
 
-// A project belongs to a workspace and a client
 type Project = {
   projectId: string;
   workspaceId: string;
@@ -108,7 +107,6 @@ type Project = {
   updatedAt: string;
 };
 
-// An invoice belongs to a project
 type Invoice = {
   invoiceId: string;
   workspaceId: string;
@@ -116,9 +114,9 @@ type Invoice = {
   projectId: string;
   invoiceNumber: string;
   status: "draft" | "sent" | "paid" | "overdue";
-  amountCents: number;   // Always store money as integer cents, never floats
-  currency: string;      // "GBP", "USD", etc.
-  dueDate: string;       // ISO 8601 date
+  amountCents: number;
+  currency: string;
+  dueDate: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -160,14 +158,14 @@ Every invoice item carries these attributes, giving us a workspace-scoped index 
 
 Here's the complete item shape for each entity, showing all attributes including the key fields and GSI fields:
 
+Every item in the table extends `DynamoItem`. Items that appear in GSI1 additionally carry `gsi1pk` and `gsi1sk`.
+
 ```typescript
-// All DynamoDB items for Runway share these key fields
 type DynamoItem = {
   pk: string;
   sk: string;
 };
 
-// Items that appear in GSI1 carry these additional fields
 type Gsi1Item = {
   gsi1pk: string;
   gsi1sk: string;
@@ -262,7 +260,6 @@ export default $config({
 
     const api = new sst.aws.ApiGatewayV2("RunwayApi");
 
-    // Link the table to every route
     const routeDefaults = {
       link: [table],
     };
@@ -347,8 +344,8 @@ const client = new DynamoDBClient({});
 
 export const docClient = DynamoDBDocumentClient.from(client, {
   marshallOptions: {
-    removeUndefinedValues: true,  // Don't store undefined as NULL
-    convertEmptyValues: false,    // Don't silently convert "" to NULL
+    removeUndefinedValues: true,
+    convertEmptyValues: false,
   },
 });
 ```
@@ -622,7 +619,7 @@ export async function updateClient(
     values[":company"] = updates.company;
   }
 
-  if (expressions.length === 0) return; // Nothing to update
+  if (expressions.length === 0) return;
 
   try {
     await docClient.send(
@@ -688,7 +685,6 @@ import { AppError } from "../lib/errors";
 
 const TABLE = Resource.RunwayTable.name;
 
-// List all invoices for a project (primary key query)
 export async function listInvoicesByProject(
   projectId: string,
 ): Promise<InvoiceItem[]> {
@@ -701,14 +697,13 @@ export async function listInvoicesByProject(
         ":pk": keys.invoice.pk(projectId),
         ":skPrefix": "INVOICE#",
       },
-      ScanIndexForward: false, // Newest first
+      ScanIndexForward: false,
     }),
   );
 
   return (result.Items as InvoiceItem[]) ?? [];
 }
 
-// List all invoices for a workspace (GSI query)
 export async function listInvoicesByWorkspace(
   workspaceId: string,
 ): Promise<InvoiceItem[]> {
@@ -729,7 +724,6 @@ export async function listInvoicesByWorkspace(
   return (result.Items as InvoiceItem[]) ?? [];
 }
 
-// List unpaid/overdue invoices for a workspace
 export async function listOutstandingInvoices(
   workspaceId: string,
 ): Promise<InvoiceItem[]> {
@@ -917,12 +911,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     : 50;
   const cursor = event.queryStringParameters?.cursor;
 
-  // Verify workspace exists before querying
   const workspace = await getWorkspace(workspaceId);
   if (!workspace) return notFound("Workspace");
 
   const result = await listClients(workspaceId, {
-    limit: Math.min(limit, 100), // Cap at 100 to prevent abuse
+    limit: Math.min(limit, 100),
     cursor,
   });
 
@@ -1026,7 +1019,7 @@ Add a `version` attribute to any entity that needs it:
 ```typescript
 type InvoiceItem = DynamoItem & Gsi1Item & {
   // ... other fields ...
-  version: number;  // Add this
+  version: number;
 };
 ```
 
