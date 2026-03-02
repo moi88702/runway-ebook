@@ -69,7 +69,7 @@ const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables", {
       maxAge: 3000,
     },
   ],
-  versioning: false,   // Deliverables don't need version history
+  versioning: false,
   transform: {
     bucket: {
       forceDestroy: $app.stage !== "production",
@@ -133,7 +133,6 @@ The S3 client lives in `src/lib/s3.ts`:
 // src/lib/s3.ts
 import { S3Client } from "@aws-sdk/client-s3";
 
-// Module-level — reused across warm invocations
 const s3Client = new S3Client({});
 
 export { s3Client };
@@ -236,7 +235,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     return badRequest("Missing path parameters");
   }
 
-  // Parse and validate request body
   let body: z.infer<typeof requestSchema>;
   try {
     body = requestSchema.parse(JSON.parse(event.body ?? "{}"));
@@ -246,36 +244,29 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
   const { filename, contentType, sizeBytes } = body;
 
-  // Validate content type
   if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
     return badRequest(`Content type not allowed: ${contentType}`);
   }
 
-  // In Chapter 7 (Cognito auth), this comes from the JWT.
-  // For now, we expect it in a header for development purposes.
-  const userId = event.headers["x-user-id"];
+  const userId = event.headers["x-user-id"]; // Chapter 7 replaces this with JWT extraction
   if (!userId) {
     return forbidden("Authentication required");
   }
 
-  // Verify the user belongs to this workspace
   const membership = await getWorkspaceMembership(workspaceId, userId);
   if (!membership) {
     return forbidden("Not a member of this workspace");
   }
 
-  // Generate a stable, unique key for this deliverable
   const fileId = randomUUID();
   const sanitisedFilename = sanitiseFilename(filename);
   const key = `workspaces/${workspaceId}/projects/${projectId}/deliverables/${fileId}/${sanitisedFilename}`;
 
-  // Generate presigned URL valid for 15 minutes
   const command = new PutObjectCommand({
     Bucket: Resource.RunwayDeliverables.name,
     Key: key,
     ContentType: contentType,
     ContentLength: sizeBytes,
-    // Metadata stored with the object — available without downloading the file
     Metadata: {
       "workspace-id": workspaceId,
       "project-id": projectId,
@@ -285,9 +276,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     },
   });
 
-  const uploadUrl = await getSignedUrl(s3Client, command, {
-    expiresIn: 15 * 60, // 15 minutes in seconds
-  });
+  const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 900 });
 
   logger.info("Generated upload URL", {
     workspaceId,
@@ -307,10 +296,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
 function sanitiseFilename(filename: string): string {
   return filename
-    .replace(/[^a-zA-Z0-9._-]/g, "-")  // Replace unsafe chars with hyphen
-    .replace(/-+/g, "-")                // Collapse multiple hyphens
-    .replace(/^-|-$/g, "")             // Strip leading/trailing hyphens
-    .slice(0, 200);                    // Enforce a max length
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 200);
 }
 ```
 
@@ -356,29 +345,23 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     return forbidden("Authentication required");
   }
 
-  // Verify workspace membership
   const membership = await getWorkspaceMembership(workspaceId, userId);
   if (!membership) {
     return forbidden("Access denied");
   }
 
-  // Look up the deliverable metadata from DynamoDB
   const deliverable = await getDeliverable(workspaceId, projectId, deliverableId);
   if (!deliverable) {
     return notFound("Deliverable not found");
   }
 
-  // The key is derived from the workspaceId — a user from another workspace
-  // cannot construct a valid key that passes the membership check above
   const key = deliverable.s3Key;
 
-  // Verify the key belongs to this workspace (belt-and-suspenders)
   if (!key.startsWith(`workspaces/${workspaceId}/`)) {
     logger.error("Key workspace mismatch", { key, workspaceId, deliverableId });
     return forbidden("Access denied");
   }
 
-  // Check the object still exists (it might have been deleted or not yet uploaded)
   try {
     await s3Client.send(
       new HeadObjectCommand({
@@ -393,17 +376,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     throw err;
   }
 
-  // Generate a presigned GET URL valid for 1 hour
   const command = new GetObjectCommand({
     Bucket: Resource.RunwayDeliverables.name,
     Key: key,
-    // Force browser to download rather than display inline
     ResponseContentDisposition: `attachment; filename="${deliverable.filename}"`,
   });
 
-  const downloadUrl = await getSignedUrl(s3Client, command, {
-    expiresIn: 60 * 60, // 1 hour
-  });
+  const downloadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
 
   logger.info("Generated download URL", {
     workspaceId,
@@ -472,7 +451,6 @@ interface UploadResult {
 export async function uploadDeliverable(req: UploadRequest): Promise<UploadResult> {
   const { file, workspaceId, projectId, apiBaseUrl, authToken, onProgress } = req;
 
-  // Step 1: Request a presigned upload URL from the API
   const urlResponse = await fetch(
     `${apiBaseUrl}/workspaces/${workspaceId}/projects/${projectId}/deliverables/upload-url`,
     {
@@ -496,14 +474,12 @@ export async function uploadDeliverable(req: UploadRequest): Promise<UploadResul
 
   const { uploadUrl, key, fileId } = await urlResponse.json();
 
-  // Step 2: Upload the file directly to S3 using the presigned URL
   const etag = await uploadToS3({
     uploadUrl,
     file,
     onProgress,
   });
 
-  // Step 3: Confirm the upload to the API (creates the DynamoDB record)
   const confirmResponse = await fetch(
     `${apiBaseUrl}/workspaces/${workspaceId}/projects/${projectId}/deliverables/${fileId}/confirm`,
     {
@@ -549,8 +525,6 @@ async function uploadToS3(params: {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
 
-    // XHR is used instead of fetch because fetch doesn't support upload
-    // progress events natively in all environments
     if (onProgress) {
       xhr.upload.addEventListener("progress", (event) => {
         if (event.lengthComputable) {
@@ -562,7 +536,6 @@ async function uploadToS3(params: {
 
     xhr.addEventListener("load", () => {
       if (xhr.status === 200) {
-        // ETag is returned by S3 on successful PUT — it's the MD5 of the uploaded content
         const etag = xhr.getResponseHeader("ETag")?.replace(/"/g, "") ?? "";
         resolve(etag);
       } else {
@@ -588,7 +561,6 @@ async function uploadToS3(params: {
 The `XMLHttpRequest` is used instead of `fetch` for the S3 PUT because `fetch` doesn't expose upload progress events in a cross-browser way. If progress tracking isn't required, `fetch` works fine:
 
 ```typescript
-// Simpler version without progress tracking
 async function uploadToS3Simple(uploadUrl: string, file: File): Promise<string> {
   const response = await fetch(uploadUrl, {
     method: "PUT",
@@ -665,13 +637,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     return badRequest("Invalid request body");
   }
 
-  // Verify the key belongs to this workspace and project
   const expectedKeyPrefix = `workspaces/${workspaceId}/projects/${projectId}/deliverables/${deliverableId}/`;
   if (!body.key.startsWith(expectedKeyPrefix)) {
     return forbidden("Invalid key");
   }
 
-  // Verify the object actually exists in S3
   let s3Metadata: Record<string, string>;
   try {
     const head = await s3Client.send(
@@ -688,14 +658,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     throw err;
   }
 
-  // Guard against duplicate confirms (idempotency)
   const existing = await getDeliverable(workspaceId, projectId, deliverableId);
   if (existing) {
-    // Already confirmed — return the existing record (idempotent)
     return ok(existing);
   }
 
-  // Create the DynamoDB record
   const deliverable = await createDeliverable({
     workspaceId,
     projectId,
@@ -751,16 +718,12 @@ interface Deliverable {
   uploadedBy: string;
   etag?: string;
   status: "active" | "processing" | "deleted";
-  thumbnailKey?: string;    // Set by the processing Lambda
-  pageCount?: number;       // For PDFs
-  dimensions?: { width: number; height: number }; // For images
+  thumbnailKey?: string;
+  pageCount?: number;
+  dimensions?: { width: number; height: number };
   createdAt: string;
   updatedAt?: string;
 }
-
-// DynamoDB key structure:
-// pk: WORKSPACE#{workspaceId}
-// sk: DELIVERABLE#{projectId}#{deliverableId}
 
 export async function createDeliverable(deliverable: Deliverable): Promise<Deliverable> {
   await docClient.send(
@@ -772,7 +735,7 @@ export async function createDeliverable(deliverable: Deliverable): Promise<Deliv
         entityType: "DELIVERABLE",
         ...deliverable,
       },
-      ConditionExpression: "attribute_not_exists(pk)", // Don't overwrite existing
+      ConditionExpression: "attribute_not_exists(pk)",
     })
   );
 
@@ -872,20 +835,16 @@ const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables", {
   // ... (same as before)
 });
 
-// Processor Lambda — triggered by S3 object creation
 deliverablesBucket.subscribe(
   {
     handler: "src/functions/deliverables/process-upload.handler",
     link: [deliverablesBucket, table],
-    timeout: "2 minutes",  // Processing can take time — give it room
-    memory: "1024 MB",     // Sharp (image resizing) needs memory
+    timeout: "2 minutes",
+    memory: "1024 MB",
   },
   {
-    // Only fire on object creation events
     events: ["s3:ObjectCreated:*"],
-    // Only process files in the deliverables path (not thumbnails or metadata)
     filterPrefix: "workspaces/",
-    filterSuffix: undefined, // Process all file types
   }
 );
 ```
@@ -915,7 +874,6 @@ import { getObjectStream, streamToBuffer } from "../../lib/s3-utils";
 export const handler: S3Handler = async (event: S3Event) => {
   const logger = createLogger("s3-processor");
 
-  // S3 can batch multiple events in one invocation
   for (const record of event.Records) {
     const bucket = record.s3.bucket.name;
     const key = decodeURIComponent(record.s3.object.key.replace(/\+/g, " "));
@@ -926,13 +884,7 @@ export const handler: S3Handler = async (event: S3Event) => {
     try {
       await processObject(bucket, key, sizeBytes, logger);
     } catch (err) {
-      // Log the error but don't re-throw — see note below
-      logger.error("Failed to process upload", {
-        bucket,
-        key,
-        err: String(err),
-      });
-      // In production, push to a DLQ or update the deliverable status to "failed"
+      logger.error("Failed to process upload", { bucket, key, err: String(err) });
     }
   }
 };
@@ -943,7 +895,6 @@ async function processObject(
   sizeBytes: number,
   logger: ReturnType<typeof createLogger>
 ): Promise<void> {
-  // Parse workspace/project/deliverable from the key structure
   const parsed = parseDeliverableKey(key);
   if (!parsed) {
     logger.warn("Could not parse deliverable key — skipping", { key });
@@ -952,7 +903,6 @@ async function processObject(
 
   const { workspaceId, projectId, deliverableId } = parsed;
 
-  // Get the object metadata (without downloading the body)
   const head = await s3Client.send(
     new HeadObjectCommand({ Bucket: bucket, Key: key })
   );
@@ -960,7 +910,6 @@ async function processObject(
   const contentType = head.ContentType ?? "application/octet-stream";
   const metadata: Record<string, unknown> = {};
 
-  // Process based on content type
   if (isImage(contentType)) {
     logger.info("Processing image", { key, contentType });
 
@@ -968,12 +917,10 @@ async function processObject(
       const thumbnailKey = await generateThumbnail(bucket, key, workspaceId, projectId, deliverableId);
       metadata.thumbnailKey = thumbnailKey;
 
-      // Get image dimensions using sharp
       const { width, height } = await getImageDimensions(bucket, key);
       metadata.dimensions = { width, height };
     } catch (err) {
       logger.warn("Thumbnail generation failed", { key, err: String(err) });
-      // Non-fatal — continue to update other metadata
     }
   } else if (contentType === "application/pdf") {
     logger.info("Processing PDF", { key });
@@ -986,7 +933,6 @@ async function processObject(
     }
   }
 
-  // Update the DynamoDB record with extracted metadata
   await updateDeliverableMetadata(workspaceId, projectId, deliverableId, {
     ...metadata,
     status: "active",
@@ -1007,7 +953,6 @@ function parseDeliverableKey(key: string): {
   deliverableId: string;
   filename: string;
 } | null {
-  // Expected format: workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/{filename}
   const match = key.match(
     /^workspaces\/([^/]+)\/projects\/([^/]+)\/deliverables\/([^/]+)\/(.+)$/
   );
@@ -1046,21 +991,16 @@ async function generateThumbnail(
   projectId: string,
   deliverableId: string
 ): Promise<string> {
-  // Download the original image
   const originalObject = await s3Client.send(
     new GetObjectCommand({ Bucket: bucket, Key: key })
   );
 
   const imageBuffer = await streamToBuffer(originalObject.Body as NodeJS.ReadableStream);
 
-  // Generate the medium thumbnail
-  const { name: sizeName, width, height } = THUMBNAIL_SIZES[1]; // "md"
+  const { name: sizeName, width, height } = THUMBNAIL_SIZES[1];
 
   const thumbnailBuffer = await Sharp(imageBuffer)
-    .resize(width, height, {
-      fit: "inside",         // Maintain aspect ratio, fit within dimensions
-      withoutEnlargement: true, // Don't upscale small images
-    })
+    .resize(width, height, { fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 85, progressive: true })
     .toBuffer();
 
@@ -1072,7 +1012,6 @@ async function generateThumbnail(
       Key: thumbnailKey,
       Body: thumbnailBuffer,
       ContentType: "image/jpeg",
-      // Thumbnails can be cached aggressively — they don't change
       CacheControl: "public, max-age=31536000, immutable",
     })
   );
@@ -1115,7 +1054,7 @@ deliverablesBucket.subscribe(
     timeout: "2 minutes",
     memory: "1024 MB",
     nodejs: {
-      install: ["sharp"],  // Bundle sharp with its native binary
+      install: ["sharp"],
     },
   },
   // ...
@@ -1128,9 +1067,9 @@ The `install: ["sharp"]` tells SST to install Sharp with `npm install` after bun
 
 For PDFs, extract the page count. This is metadata displayed in the Runway UI so clients know what they're downloading before they do.
 
+First install the library (`npm install pdf-parse && npm install -D @types/pdf-parse`), then:
+
 ```typescript
-// Install: npm install pdf-parse
-// npm install -D @types/pdf-parse
 import pdfParse from "pdf-parse";
 
 async function getPdfPageCount(bucket: string, key: string): Promise<number> {
@@ -1141,13 +1080,9 @@ async function getPdfPageCount(bucket: string, key: string): Promise<number> {
   const buffer = await streamToBuffer(object.Body as NodeJS.ReadableStream);
 
   try {
-    const data = await pdfParse(buffer, {
-      // Only parse page count — don't extract text content
-      max: 0,
-    });
+    const data = await pdfParse(buffer, { max: 0 });
     return data.numpages;
   } catch {
-    // Malformed or encrypted PDF — return 0 as a safe default
     return 0;
   }
 }
@@ -1208,7 +1143,6 @@ The options:
 Production recommendation: combine options 2 and 1. Update the status to `"processing_failed"` on error (user-visible), and configure a DLQ (ops-visible). Both signals, no gaps.
 
 ```typescript
-// In process-upload.ts handler — enhanced error handling
 export const handler: S3Handler = async (event: S3Event) => {
   const logger = createLogger("s3-processor");
 
@@ -1223,8 +1157,6 @@ export const handler: S3Handler = async (event: S3Event) => {
 
       const parsed = parseDeliverableKey(key);
       if (parsed) {
-        // Mark the deliverable as failed in DynamoDB
-        // The UI can surface this to the user
         try {
           await updateDeliverableMetadata(
             parsed.workspaceId,
@@ -1240,7 +1172,6 @@ export const handler: S3Handler = async (event: S3Event) => {
         }
       }
 
-      // Re-throw to trigger Lambda retry and (if configured) DLQ delivery
       throw err;
     }
   }
@@ -1266,7 +1197,7 @@ This flow triggers when a freelancer requests to generate their invoice. The Lam
 api.route("POST /workspaces/{workspaceId}/invoices/{invoiceId}/generate-pdf", {
   handler: "src/functions/invoices/generate-pdf.handler",
   link: [invoicesBucket, table],
-  timeout: "30 seconds",  // PDF generation can take a moment
+  timeout: "30 seconds",
   memory: "512 MB",
 });
 ```
@@ -1325,7 +1256,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
   const key = `workspaces/${workspaceId}/invoices/${invoiceId}/invoice-${invoice.invoiceNumber}.pdf`;
 
-  // Store the PDF in S3
   await s3Client.send(
     new PutObjectCommand({
       Bucket: Resource.RunwayInvoices.name,
@@ -1340,9 +1270,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     })
   );
 
-  // Generate a presigned URL valid for 72 hours
-  // Invoice PDFs are often forwarded to accountants or clients by email —
-  // they need to remain accessible long enough for that workflow
   const downloadUrl = await getSignedUrl(
     s3Client,
     new (await import("@aws-sdk/client-s3")).GetObjectCommand({
@@ -1369,7 +1296,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 async function generateInvoicePdf(invoice: Awaited<ReturnType<typeof getInvoice>>): Promise<Buffer> {
   if (!invoice) throw new Error("Invoice is null");
 
-  // Render the invoice as HTML
   const html = renderInvoiceHtml(invoice);
 
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
@@ -1614,15 +1540,10 @@ Runway's entire file storage model is private-by-default. No object in either bu
 
 This should be your default. Both buckets have public access blocked:
 
-```typescript
-// In SST, buckets are private by default
-// The sst.aws.Bucket component sets BlockPublicAcls,
-// IgnorePublicAcls, BlockPublicPolicy, and RestrictPublicBuckets automatically
-// when no public configuration is specified
+`sst.aws.Bucket` sets `BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, and `RestrictPublicBuckets` automatically when no public configuration is specified.
 
-const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables", {
-  // No public:true — private by default
-});
+```typescript
+const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables", {});
 ```
 
 To verify in the AWS Console: S3 → your bucket → Permissions → Block public access. All four settings should be enabled.
@@ -1678,10 +1599,9 @@ But the pattern for public assets (profile pictures, publicly shared project por
 // sst.config.ts — for a hypothetical public portfolio bucket
 const portfolioBucket = new sst.aws.Bucket("RunwayPortfolio");
 
-// CloudFront distribution in front of the bucket
 const cdn = new sst.aws.Router("RunwayCdn", {
   routes: {
-    "/*": portfolioBucket,  // Route all traffic to the bucket
+    "/*": portfolioBucket,
   },
   domain: {
     name: "assets.runway.so",
@@ -1741,45 +1661,26 @@ const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables", {
   cors: [/* ... */],
   transform: {
     bucket: (args) => {
-      // Lifecycle configuration applied directly to the bucket
       args.lifecycleRules = [
         {
-          // Rule 1: Abort incomplete multipart uploads after 24 hours
           id: "abort-incomplete-multipart",
           status: "Enabled",
-          abortIncompleteMultipartUpload: {
-            daysAfterInitiation: 1,
-          },
+          abortIncompleteMultipartUpload: { daysAfterInitiation: 1 },
         },
         {
-          // Rule 2: Move old deliverables to Infrequent Access after 90 days
-          // Infrequent Access is ~40% cheaper than Standard
-          // But has a 30-day minimum and retrieval cost — worth it for old files
           id: "ia-transition-deliverables",
           status: "Enabled",
           prefix: "workspaces/",
           transitions: [
-            {
-              days: 90,
-              storageClass: "STANDARD_IA",
-            },
-            {
-              days: 365,
-              storageClass: "GLACIER_INSTANT_RETRIEVAL",
-            },
+            { days: 90, storageClass: "STANDARD_IA" },
+            { days: 365, storageClass: "GLACIER_INSTANT_RETRIEVAL" },
           ],
         },
         {
-          // Rule 3: Clean up thumbnails if the deliverable is deleted
-          // (Handled by application logic — see below)
-          // Thumbnails older than 30 days with no parent object can be deleted
           id: "cleanup-orphaned-thumbnails",
           status: "Enabled",
           prefix: "workspaces/",
-          filter: {
-            // Only apply to thumbnail keys
-            prefix: "", // We'll rely on application logic instead
-          },
+          filter: { prefix: "" },
         },
       ];
     },
@@ -1851,15 +1752,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     return notFound("Deliverable not found");
   }
 
-  // Delete the DynamoDB record first
-  // If S3 deletion fails, the record is gone and the file is effectively orphaned —
-  // the lifecycle policy will clean it up eventually
   await deleteDeliverable(workspaceId, projectId, deliverableId);
 
-  // Delete all objects with this deliverable's prefix (original + thumbnails + metadata)
   const prefix = `workspaces/${workspaceId}/projects/${projectId}/deliverables/${deliverableId}/`;
 
-  // List all objects under the prefix
   const listResult = await s3Client.send(
     new ListObjectsV2Command({
       Bucket: Resource.RunwayDeliverables.name,
@@ -1868,13 +1764,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   );
 
   if (listResult.Contents && listResult.Contents.length > 0) {
-    // Delete all objects in a single batch request (up to 1000 per request)
     await s3Client.send(
       new DeleteObjectsCommand({
         Bucket: Resource.RunwayDeliverables.name,
         Delete: {
           Objects: listResult.Contents.map((obj) => ({ Key: obj.Key! })),
-          Quiet: true, // Don't return individual deletion results
+          Quiet: true,
         },
       })
     );
@@ -2026,7 +1921,6 @@ export default $config({
               abortIncompleteMultipartUpload: { daysAfterInitiation: 1 },
             },
             {
-              // Invoice PDFs don't need Glacier — they're small and occasionally re-downloaded
               id: "ia-transition",
               status: "Enabled",
               transitions: [
@@ -2061,8 +1955,7 @@ export default $config({
     // ─── API Gateway ─────────────────────────────────────────────────────────
     const api = new sst.aws.ApiGatewayV2("RunwayApi");
 
-    // Existing routes (Chapters 1-5)
-    // ... workspaces, clients, projects, invoices, reports ...
+    // ... existing routes from Chapters 1-5 ...
 
     // ─── Deliverable Routes ──────────────────────────────────────────────────
     api.route(
@@ -2194,7 +2087,6 @@ The URL generation logic is the part worth unit testing. Mock the S3 client and 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handler } from "./create-upload-url";
 
-// Mock the AWS SDK
 vi.mock("@aws-sdk/client-s3", () => ({
   S3Client: vi.fn().mockImplementation(() => ({})),
   PutObjectCommand: vi.fn(),
@@ -2204,7 +2096,6 @@ vi.mock("@aws-sdk/s3-request-presigner", () => ({
   getSignedUrl: vi.fn().mockResolvedValue("https://s3.amazonaws.com/presigned-url"),
 }));
 
-// Mock SST Resource (injected env vars in production)
 vi.mock("sst", () => ({
   Resource: {
     RunwayDeliverables: { name: "test-bucket" },
@@ -2290,7 +2181,6 @@ describe("create-upload-url", () => {
     const result = await handler(event as any, {} as any);
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body as string);
-    // Spaces and brackets should be replaced with hyphens
     expect(body.key).not.toContain(" ");
     expect(body.key).not.toContain("(");
     expect(body.key).not.toContain("[");
@@ -2304,13 +2194,8 @@ For a fuller test that exercises the actual upload flow, use `sst dev` with a te
 
 ```typescript
 // tests/integration/deliverables.test.ts
-// Run with: NODE_ENV=test npx vitest run --stage test
-
 import { describe, it, expect } from "vitest";
 import { Resource } from "sst";
-
-// With sst dev running against the "test" stage, Resource is populated
-// with real bucket names and table names
 
 describe("deliverable upload flow (integration)", () => {
   it("completes full upload flow", async () => {
@@ -2318,7 +2203,6 @@ describe("deliverable upload flow (integration)", () => {
     const workspaceId = "test-ws";
     const projectId = "test-p";
 
-    // Step 1: Get upload URL
     const uploadUrlRes = await fetch(
       `${baseUrl}/workspaces/${workspaceId}/projects/${projectId}/deliverables/upload-url`,
       {
@@ -2338,8 +2222,7 @@ describe("deliverable upload flow (integration)", () => {
     expect(uploadUrlRes.status).toBe(200);
     const { uploadUrl, key, fileId } = await uploadUrlRes.json();
 
-    // Step 2: Upload a fake PDF directly to S3
-    const fakePdf = new Uint8Array(1024).fill(0x25); // 0x25 = '%' char in PDF header
+    const fakePdf = new Uint8Array(1024).fill(0x25);
     const uploadRes = await fetch(uploadUrl, {
       method: "PUT",
       headers: { "Content-Type": "application/pdf" },
@@ -2348,7 +2231,6 @@ describe("deliverable upload flow (integration)", () => {
 
     expect(uploadRes.status).toBe(200);
 
-    // Step 3: Confirm the upload
     const confirmRes = await fetch(
       `${baseUrl}/workspaces/${workspaceId}/projects/${projectId}/deliverables/${fileId}/confirm`,
       {
@@ -2371,7 +2253,6 @@ describe("deliverable upload flow (integration)", () => {
     expect(deliverable.deliverableId).toBe(fileId);
     expect(deliverable.status).toBe("active");
 
-    // Step 4: Get a download URL
     const downloadUrlRes = await fetch(
       `${baseUrl}/workspaces/${workspaceId}/projects/${projectId}/deliverables/${fileId}/download`,
       {
@@ -2383,7 +2264,6 @@ describe("deliverable upload flow (integration)", () => {
     const { downloadUrl } = await downloadUrlRes.json();
     expect(downloadUrl).toContain("s3.amazonaws.com");
 
-    // Step 5: Download the file using the signed URL
     const fileRes = await fetch(downloadUrl);
     expect(fileRes.status).toBe(200);
     expect(fileRes.headers.get("Content-Type")).toBe("application/pdf");
