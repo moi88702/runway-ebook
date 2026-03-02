@@ -70,30 +70,25 @@ export default $config({
     };
   },
   async run() {
-    // Existing resources from previous chapters
     const table = new sst.aws.Dynamo("RunwayTable", {
       // ... (same as Chapter 4)
     });
 
-    // VPC for Aurora
     const vpc = new sst.aws.Vpc("RunwayVpc", {
-      az: 2,  // Two availability zones for Aurora's multi-AZ requirement
+      az: 2,
     });
 
-    // Aurora Serverless v2
     const db = new sst.aws.Aurora("RunwayDb", {
       engine: "postgres",
       vpc,
       scaling: {
-        min: "0 ACU",   // Scale to zero when idle
-        max: "4 ACU",   // Enough for Runway's reporting load
+        min: "0 ACU",
+        max: "4 ACU",
       },
     });
 
-    // Existing API (from Chapters 1-4)
     const api = new sst.aws.ApiGatewayV2("RunwayApi");
 
-    // Report routes — these Lambdas go in the VPC to reach Aurora
     api.route("GET /workspaces/{workspaceId}/reports/revenue", {
       handler: "src/functions/reports/revenue.handler",
       link: [db, table],
@@ -122,17 +117,7 @@ export default $config({
 
 Aurora generates a master username and password. SST stores these in AWS Secrets Manager and injects them as `DATABASE_URL` when you link `db` to a function. You never see the password in your code or environment files.
 
-Access it in your Lambda:
-
-```typescript
-import { Resource } from "sst";
-
-// Resource.RunwayDb.host       — the Aurora endpoint
-// Resource.RunwayDb.port       — typically 5432 for Postgres
-// Resource.RunwayDb.database   — the database name
-// Resource.RunwayDb.username   — master username
-// Resource.RunwayDb.password   — master password (injected at runtime)
-```
+The linked `db` resource exposes these fields on `Resource.RunwayDb`: `host` (Aurora endpoint), `port` (5432 for Postgres), `database`, `username`, and `password` (injected at runtime from Secrets Manager — never in your code).
 
 For the Prisma connection URL:
 
@@ -167,7 +152,7 @@ const db = new sst.aws.Aurora("RunwayDb", {
   engine: "postgres",
   vpc,
   scaling: { min: "0 ACU", max: "4 ACU" },
-  proxy: true,  // Enables RDS Proxy
+  proxy: true,
 });
 ```
 
@@ -182,7 +167,6 @@ const db = new sst.aws.Aurora("RunwayDb", {
   engine: "postgres",
   vpc,
   scaling: { min: "0 ACU", max: "4 ACU" },
-  // No proxy: true — direct connection
 });
 ```
 
@@ -205,12 +189,13 @@ npx prisma init
 
 Prisma creates a `prisma/` directory with `schema.prisma`. Update it for Runway's reporting model:
 
+The `driverAdapters` preview feature switches Prisma to the WASM query engine (~6MB vs the default ~50MB native binary). This is essential for Lambda's package size limits.
+
 ```prisma
 // prisma/schema.prisma
 
 generator client {
-  provider = "prisma-client-js"
-  // Use the lightweight WASM query engine for Lambda
+  provider        = "prisma-client-js"
   previewFeatures = ["driverAdapters"]
 }
 
@@ -218,9 +203,6 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
-
-// Runway's Aurora schema — report-focused, not operational
-// Operational data lives in DynamoDB
 
 model Workspace {
   id        String   @id
@@ -280,7 +262,6 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { Resource } from "sst";
 
-// Module-level — reused across warm Lambda invocations
 let prisma: PrismaClient | undefined;
 
 export function getPrismaClient(): PrismaClient {
@@ -292,7 +273,7 @@ export function getPrismaClient(): PrismaClient {
 
   const pool = new Pool({
     connectionString,
-    max: 1,  // Each Lambda execution environment gets one connection
+    max: 1,
     idleTimeoutMillis: 0,
     connectionTimeoutMillis: 5000,
   });
@@ -334,8 +315,6 @@ export const handler = async () => {
   console.log("Running database migrations...");
 
   try {
-    // prisma migrate deploy applies pending migrations
-    // It's idempotent — safe to run multiple times
     execSync("npx prisma migrate deploy", {
       env: {
         ...process.env,
@@ -371,7 +350,6 @@ const migrationRunner = new sst.aws.Function("MigrationRunner", {
   link: [db],
   vpc,
   timeout: "5 minutes",
-  // Bundle the prisma schema and migrations with the function
   nodejs: {
     install: ["prisma", "@prisma/client"],
   },
@@ -466,18 +444,17 @@ CREATE TRIGGER after_payment_insert
 
 RDS event subscriptions publish database lifecycle events to SNS — things like failovers, parameter group changes, backup completions, and storage alarms.
 
+SST doesn't have a first-class component for RDS event subscriptions yet, so use a raw `aws.rds.EventSubscription` Pulumi resource alongside the SST resources.
+
 ```typescript
 // sst.config.ts
 const dbEventTopic = new sst.aws.SnsTopic("DbEvents");
 
-// Subscribe a Lambda to the SNS topic
 const dbEventHandler = new sst.aws.Function("DbEventHandler", {
   handler: "src/functions/db-events.handler",
 });
 dbEventTopic.subscribe(dbEventHandler.arn);
 
-// RDS event subscription (using AWS SDK or CloudFormation)
-// SST doesn't have a first-class component for this yet, so use a raw resource
 const eventSubscription = new aws.rds.EventSubscription("DbEventSubscription", {
   snsTopic: dbEventTopic.arn,
   sourceType: "db-cluster",
@@ -495,12 +472,10 @@ export const handler: SNSHandler = async (event) => {
     const message = JSON.parse(record.Sns.Message);
 
     if (message.EventID === "RDS-EVENT-0049") {
-      // Failover started — alert the on-call engineer
       await sendSlackAlert(`Aurora failover in progress: ${message.SourceIdentifier}`);
     }
 
     if (message.EventID === "RDS-EVENT-0051") {
-      // Failover complete
       await sendSlackAlert(`Aurora failover complete — connections restored`);
     }
   }
@@ -522,10 +497,8 @@ Aurora (source) → DMS Replication Task → Kinesis Data Stream → Lambda
 This is the pattern for streaming every INSERT, UPDATE, DELETE from Aurora to downstream consumers.
 
 ```typescript
-// Kinesis stream for CDC events
 const cdcStream = new sst.aws.KinesisStream("AuroraCdcStream");
 
-// Lambda processes the CDC events
 const cdcProcessor = new sst.aws.Function("CdcProcessor", {
   handler: "src/functions/cdc.handler",
 });
@@ -551,7 +524,6 @@ export const handler: KinesisStreamHandler = async (event) => {
       cdcEvent.metadata.operation === "INSERT" &&
       cdcEvent.metadata["table-name"] === "invoice_payments"
     ) {
-      // A payment was recorded — trigger downstream processing
       await handleNewPayment(cdcEvent.data);
     }
   }
@@ -605,10 +577,9 @@ export async function recordPayment(data: {
       currency: data.currency,
       paidAt: data.paidAt,
     },
-    update: {}, // Idempotent — second call for the same invoice is a no-op
+    update: {},
   });
 
-  // Ensure the workspace exists in Aurora too
   await prisma.workspace.upsert({
     where: { id: data.workspaceId },
     create: { id: data.workspaceId, name: data.workspaceName },
@@ -638,7 +609,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const prisma = getPrismaClient();
 
   try {
-    // Monthly revenue for the last 12 months
     const monthlyRevenue = await prisma.$queryRaw<
       Array<{ month: Date; total_cents: bigint; invoice_count: bigint }>
     >`
@@ -653,7 +623,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       ORDER BY month DESC
     `;
 
-    // Revenue by client (all time)
     const revenueByClient = await prisma.invoicePayment.groupBy({
       by: ["clientId", "clientName"],
       where: { workspaceId },
@@ -663,7 +632,6 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       take: 10,
     });
 
-    // Total all-time
     const totals = await prisma.invoicePayment.aggregate({
       where: { workspaceId },
       _sum: { amountCents: true },
@@ -672,8 +640,8 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 
     return ok({
       monthly: monthlyRevenue.map((row) => ({
-        month: row.month.toISOString().slice(0, 7), // "2025-03"
-        totalCents: Number(row.total_cents),         // BigInt → number
+        month: row.month.toISOString().slice(0, 7),
+        totalCents: Number(row.total_cents),
         invoiceCount: Number(row.invoice_count),
       })),
       byClient: revenueByClient.map((row) => ({
@@ -702,7 +670,7 @@ One thing to note: `$queryRaw` returns `bigint` for `SUM` and `COUNT` results be
 
 Aurora Serverless v2 supports read replicas — additional endpoints that handle read traffic, allowing the primary writer to focus on writes.
 
-For Runway's reporting workload, where all queries are reads, a read replica makes sense:
+For Runway's reporting workload, where all queries are reads, a read replica makes sense. SST doesn't have a first-class read replica component yet, so the replica is created as a raw `aws.rds.ClusterInstance` Pulumi resource alongside the SST Aurora cluster.
 
 ```typescript
 const db = new sst.aws.Aurora("RunwayDb", {
@@ -712,27 +680,25 @@ const db = new sst.aws.Aurora("RunwayDb", {
   proxy: true,
 });
 
-// Add a read replica (currently requires raw Pulumi resource in SST)
 const readReplica = new aws.rds.ClusterInstance("RunwayDbReader", {
   clusterIdentifier: db.clusterIdentifier,
   instanceClass: "db.serverless",
   engine: "aurora-postgresql",
   engineVersion: db.engineVersion,
-  promotionTier: 1,  // Lowest priority for failover promotion
+  promotionTier: 1,
 });
 ```
 
 Use separate connection strings for reads and writes:
 
+The write client targets the primary endpoint (`RunwayDb.host`); the read client targets the reader endpoint (`RunwayDb.readerEndpoint`).
+
 ```typescript
 // src/lib/prisma.ts
-
-// Write client — points at primary
 export function getWriteClient(): PrismaClient {
   return createClient(Resource.RunwayDb.host);
 }
 
-// Read client — points at reader endpoint
 export function getReadClient(): PrismaClient {
   return createClient(Resource.RunwayDb.readerEndpoint);
 }
