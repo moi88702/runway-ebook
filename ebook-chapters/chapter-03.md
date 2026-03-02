@@ -128,18 +128,16 @@ api.route("GET /workspaces/{workspaceId}/invoices/{invoiceId}", {
 
 In the handler, they arrive in `event.pathParameters`:
 
+The type of `pathParameters` is `Record<string, string | undefined> | undefined`, so every access needs optional chaining. Both values can be `undefined` in TypeScript, though in practice API Gateway wouldn't route here without them. The guard narrows both to `string`.
+
 ```typescript
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
-  // pathParameters is Record<string, string | undefined> | undefined
   const workspaceId = event.pathParameters?.workspaceId;
   const invoiceId = event.pathParameters?.invoiceId;
 
-  // Both can be undefined — API Gateway only populates keys it has values for
   if (!workspaceId || !invoiceId) {
     return res.badRequest("Missing path parameters");
   }
-
-  // workspaceId and invoiceId are now string (narrowed by the guard above)
 };
 ```
 
@@ -159,15 +157,14 @@ In practice, IDs in Runway (`ws_abc123`, `inv_xyz789`) never contain encoded cha
 
 Query string parameters arrive in `event.queryStringParameters`. For HTTP API v2, this is always an object (never null), but it's `Record<string, string | undefined>`:
 
+For a route like `GET /workspaces/{workspaceId}/invoices?status=draft&limit=20&cursor=abc`, every query parameter arrives as `string | undefined`. Numeric parameters need explicit coercion — `parseInt` with `isNaN` validation is the pattern.
+
 ```typescript
-// GET /workspaces/{workspaceId}/invoices?status=draft&limit=20&cursor=abc
-
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const status = event.queryStringParameters?.status;   // string | undefined
-  const limitStr = event.queryStringParameters?.limit;  // string | undefined
-  const cursor = event.queryStringParameters?.cursor;   // string | undefined
+  const status = event.queryStringParameters?.status;
+  const limitStr = event.queryStringParameters?.limit;
+  const cursor = event.queryStringParameters?.cursor;
 
-  // All query params are strings — you need to coerce numeric ones
   const limit = limitStr ? parseInt(limitStr, 10) : 20;
   if (isNaN(limit) || limit < 1 || limit > 100) {
     return res.badRequest("limit must be a number between 1 and 100");
@@ -188,18 +185,16 @@ This manual parsing is exactly why we need a validation layer. Writing these coe
 
 HTTP API passes the body as a string (or undefined for requests without a body). For JSON APIs:
 
+Always wrap `JSON.parse` in a try/catch — a malformed body throws a `SyntaxError`. After parsing, `body` is `unknown`; TypeScript won't let you access properties without narrowing it first, which is exactly why we need schema validation next.
+
 ```typescript
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  // Parse body safely — always wrap in try/catch
   let body: unknown;
   try {
     body = event.body ? JSON.parse(event.body) : {};
   } catch {
     return res.badRequest("Request body must be valid JSON");
   }
-
-  // body is now unknown — TypeScript won't let you access properties
-  // without narrowing or casting
 };
 ```
 
@@ -400,11 +395,12 @@ z.coerce.number()             // coerces string "42" to 42 (for query params)
 ```
 
 **Enums:**
-```typescript
-z.enum(["draft", "sent", "paid"])   // literal union
-// The TypeScript type is "draft" | "sent" | "paid"
 
-// Or from a const array:
+`z.enum(["draft", "sent", "paid"])` produces the TypeScript type `"draft" | "sent" | "paid"`. If you already have a `const` array elsewhere in your code, pass it directly to avoid duplication.
+
+```typescript
+z.enum(["draft", "sent", "paid"])
+
 const STATUSES = ["draft", "sent", "paid"] as const;
 z.enum(STATUSES)
 ```
@@ -418,18 +414,14 @@ z.string().default("GBP")     // undefined becomes "GBP"
 ```
 
 **Objects:**
+
+`z.object()` strips unknown keys by default. The modifiers `.strict()` (reject unknowns), `.passthrough()` (allow and forward unknowns), `.partial()` (all keys optional), `.required()` (all optional keys required), `.pick({ id: true })`, and `.omit({ id: true })` cover most real-world schema shaping needs.
+
 ```typescript
 z.object({
   id: z.string(),
   name: z.string(),
 })
-// .strict() — reject unknown keys
-// .passthrough() — allow and pass through unknown keys
-// .strip() — silently remove unknown keys (default behaviour)
-// .partial() — make all keys optional
-// .required() — make all optional keys required
-// .pick({ id: true }) — pick specific keys
-// .omit({ id: true }) — omit specific keys
 ```
 
 **Arrays:**
@@ -440,13 +432,17 @@ z.array(z.string()).max(10)  // max 10 items
 ```
 
 **Custom refinements:**
+
+`.refine()` validates a single value. When you need to validate across multiple fields — or add issues to specific paths — use `.superRefine()`, which gives you access to the Zod context object.
+
 ```typescript
 z.string().refine(
   (val) => val.startsWith("ws_"),
   { message: "Must be a valid workspace ID" }
 )
+```
 
-// .superRefine for access to context
+```typescript
 z.object({
   issueDate: z.string(),
   dueDate: z.string(),
@@ -462,13 +458,13 @@ z.object({
 ```
 
 **Transformations:**
+
+`.transform()` changes the output type — the TypeScript return type of the schema becomes the transform's return type, not the input type. `z.coerce` runs a type coercion before validation, which is the right pattern for query string numbers (they arrive as `string`, you want `number`).
+
 ```typescript
-z.string()
-  .transform(val => val.trim().toLowerCase())
-  // The output type becomes the return type of the transform
+z.string().transform(val => val.trim().toLowerCase())
 
 z.coerce.number().int().positive()
-// coerce converts "20" → 20 before validation
 ```
 
 ### Runway's schemas
@@ -505,7 +501,6 @@ export const WorkspaceQuerySchema = z.object({
   cursor: z.string().optional(),
 });
 
-// Derive TypeScript types from schemas
 export type CreateWorkspaceInput = z.infer<typeof CreateWorkspaceSchema>;
 export type UpdateWorkspaceInput = z.infer<typeof UpdateWorkspaceSchema>;
 export type WorkspaceQuery = z.infer<typeof WorkspaceQuerySchema>;
@@ -605,12 +600,10 @@ export const LineItemSchema = z.object({
   description: z.string().trim().min(1, "Description is required").max(500),
   quantity: z.number().positive("Quantity must be positive"),
   unitPriceCents: z.number().int().nonnegative("Unit price cannot be negative"),
-  // amountCents is validated to equal quantity * unitPriceCents (within rounding tolerance)
   amountCents: z.number().int().nonnegative(),
 }).superRefine((item, ctx) => {
   const expected = Math.round(item.quantity * item.unitPriceCents);
   const actual = item.amountCents;
-  // Allow 1 unit of rounding difference
   if (Math.abs(expected - actual) > 1) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -631,7 +624,6 @@ export const CreateInvoiceSchema = z.object({
   issueDate: isoDate,
   dueDate: isoDate,
   notes: z.string().trim().max(2000).optional(),
-  // Allow overriding the generated invoice number (useful for existing sequences)
   invoiceNumber: z.string().regex(/^[A-Z0-9-]+$/, "Invoice number can only contain uppercase letters, numbers, and hyphens").max(50).optional(),
 }).superRefine((data, ctx) => {
   if (data.dueDate < data.issueDate) {
@@ -678,11 +670,10 @@ Notice what we've done: the `LineItem` type in `src/types/invoice.ts` from Chapt
 
 Go back to `src/types/invoice.ts`. Most of it goes away:
 
+After Chapter 3, the type file slims down significantly. Output types — what the database returns, what the API serialises — stay here. Input types are derived from Zod schemas and re-exported from `src/schemas/`.
+
 ```typescript
 // src/types/invoice.ts — updated for Chapter 3
-// Types are now derived from schemas. Keep only the output types
-// that represent database/API response shapes (not input shapes).
-
 export type InvoiceStatus = "draft" | "sent" | "paid" | "overdue" | "cancelled";
 
 export type Invoice = {
@@ -705,7 +696,6 @@ export type Invoice = {
   updatedAt: string;
 };
 
-// Input types come from schemas — don't duplicate them here
 export type { CreateInvoiceInput, UpdateInvoiceInput, InvoiceQuery } from "../schemas/invoice";
 ```
 
@@ -732,6 +722,8 @@ The key design decision: **don't try to create a generic "all validation in one 
 
 ### Building the validation wrapper
 
+`formatZodError` converts Zod's nested error structure into a flat `Record<string, string[]>` keyed by dot-notation field paths — `"lineItems.0.description"` rather than `["lineItems", 0, "description"]`. Top-level issues (no path) land under `"_root"`.
+
 ```typescript
 // src/lib/validate.ts
 
@@ -742,12 +734,10 @@ import { res } from "./response";
 import { parseBody } from "./event";
 import { logger } from "./logger";
 
-// Format Zod errors into a client-friendly structure
 export const formatZodError = (error: ZodError): Record<string, string[]> => {
   const fieldErrors: Record<string, string[]> = {};
 
   for (const issue of error.issues) {
-    // Convert path array to dot notation: ["lineItems", 0, "description"] → "lineItems.0.description"
     const field = issue.path.length > 0
       ? issue.path.join(".")
       : "_root";
@@ -797,7 +787,6 @@ export const validate = <
   return async (event, context) => {
     const log = logger.child({ requestId: context.awsRequestId });
 
-    // Validate request body
     let validatedBody: TBody = undefined as TBody;
     if (options.body) {
       let rawBody: unknown;
@@ -818,7 +807,6 @@ export const validate = <
       validatedBody = bodyResult.data;
     }
 
-    // Validate query parameters
     let validatedQuery: TQuery = undefined as TQuery;
     if (options.query) {
       const queryResult = options.query.safeParse(
@@ -991,10 +979,9 @@ The query schema uses `z.coerce.number()` for `limit`, so even though API Gatewa
 
 ### Handlers with both body and query validation
 
-```typescript
-// Hypothetical: PUT /workspaces/{workspaceId}/invoices/{invoiceId}
-// with both a body to update and query params for response options
+To validate both body and query in one call, pass both schemas to `validate`. The `expand` param arrives as a comma-separated string (`?expand=client,project`) — the schema coerces it to `Array<"client" | "project">` before it reaches your handler.
 
+```typescript
 import { z } from "zod";
 import { validate } from "../../lib/validate";
 import { UpdateInvoiceSchema } from "../../schemas/invoice";
@@ -1002,15 +989,11 @@ import { UpdateInvoiceSchema } from "../../schemas/invoice";
 const UpdateInvoiceQuerySchema = z.object({
   expand: z.array(z.enum(["client", "project"])).optional(),
 });
-// Parsing comma-separated expand param: "?expand=client,project"
-// → ["client", "project"]
 
 export const handler = validate(
   { body: UpdateInvoiceSchema, query: UpdateInvoiceQuerySchema },
   async (event, context, { body, query }) => {
-    // body: UpdateInvoiceInput — all fields optional, validated
-    // query.expand: Array<"client" | "project"> | undefined
-    // ...
+    // body is UpdateInvoiceInput, query.expand is Array<"client"|"project"> | undefined
   }
 );
 ```
@@ -1148,9 +1131,7 @@ export const handler = validateHandler(
   async (event, context, { body }) => {
     const log = logger.child({ requestId: context.awsRequestId });
 
-    // In Chapter 7 we'll get ownerId from the JWT token
-    // For now, read from a header (placeholder until auth is wired up)
-    const ownerId = event.headers["x-user-id"];
+    const ownerId = event.headers["x-user-id"]; // Chapter 7 replaces this with JWT extraction
     if (!ownerId) return res.unauthorized();
 
     const workspace = await workspaceService.create(body, ownerId, log);
@@ -1452,11 +1433,10 @@ export const handler = validateHandler(
 );
 ```
 
+The send handler takes no body — the `POST` to the URL is itself the action.
+
 ```typescript
 // src/functions/invoices/send.ts
-// POST /workspaces/{workspaceId}/invoices/{invoiceId}/send
-// No request body needed — the action is expressed in the URL
-
 import { validateHandler } from "../../lib/validate";
 import { res } from "../../lib/response";
 import { logger } from "../../lib/logger";
@@ -1641,7 +1621,7 @@ describe("formatZodError", () => {
     const result = CreateInvoiceSchema.safeParse({
       clientId: "cli_1",
       lineItems: [
-        { description: "", quantity: 1, unitPriceCents: 100, amountCents: 100 }, // empty description
+        { description: "", quantity: 1, unitPriceCents: 100, amountCents: 100 },
       ],
       issueDate: "2025-03-01",
       dueDate: "2025-04-01",
@@ -1650,7 +1630,6 @@ describe("formatZodError", () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       const formatted = formatZodError(result.error);
-      // Nested path becomes dot notation
       expect(formatted["lineItems.0.description"]).toBeDefined();
       expect(formatted["lineItems.0.description"][0]).toContain("at least 1 character");
     }
@@ -1709,7 +1688,7 @@ describe("validate middleware", () => {
 
     const event = mockApiEvent({
       method: "POST",
-      body: { name: "", count: -1 }, // both invalid
+      body: { name: "", count: -1 },
     });
 
     const result = await handler(event, mockContext(), () => {});
@@ -1755,7 +1734,7 @@ describe("validate middleware", () => {
       event,
       expect.any(Object),
       expect.objectContaining({
-        query: { page: 3, search: "test" }, // page is number, not string
+        query: { page: 3, search: "test" },
       })
     );
   });
@@ -1769,7 +1748,6 @@ describe("validate middleware", () => {
 
     const handler = validate({ query: TestQuerySchema }, innerFn);
 
-    // No query params at all
     const event = mockApiEvent({});
 
     await handler(event, mockContext(), () => {});
@@ -1778,7 +1756,7 @@ describe("validate middleware", () => {
       event,
       expect.any(Object),
       expect.objectContaining({
-        query: { page: 1 }, // default applied
+        query: { page: 1 },
       })
     );
   });
@@ -1788,7 +1766,7 @@ describe("validate middleware", () => {
     const handler = validate({ query: TestQuerySchema }, innerFn);
 
     const event = mockApiEvent({
-      queryStringParameters: { page: "-5" }, // negative — fails .positive()
+      queryStringParameters: { page: "-5" },
     });
 
     const result = await handler(event, mockContext(), () => {});
@@ -1903,7 +1881,7 @@ const api = new sst.aws.ApiGatewayV2("RunwayApi", {
     allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "X-User-Id"],
     allowCredentials: true,
-    maxAge: isProd ? "1 day" : "1 minute",  // Short cache in dev so changes take effect fast
+    maxAge: isProd ? "1 day" : "1 minute",
   },
 });
 ```
@@ -1912,8 +1890,9 @@ const api = new sst.aws.ApiGatewayV2("RunwayApi", {
 
 CORS errors only appear in browsers. Always test your API with an actual browser request during setup. A quick test:
 
+Paste this in the browser console on your frontend app origin:
+
 ```javascript
-// Paste this in the browser console on your frontend app origin
 fetch("https://your-api-url.execute-api.eu-west-1.amazonaws.com/health", {
   method: "GET",
   headers: { "Authorization": "Bearer test" },
@@ -1942,13 +1921,11 @@ API Gateway HTTP API has built-in throttling. It's not a replacement for a full 
 
 ```typescript
 const api = new sst.aws.ApiGatewayV2("RunwayApi", {
-  // Stage-level default throttling
-  // These apply to all routes unless overridden
   transform: {
     stage: {
       defaultRouteSettings: {
-        throttlingBurstLimit: 100,  // max concurrent requests
-        throttlingRateLimit: 50,    // requests per second (steady state)
+        throttlingBurstLimit: 100,
+        throttlingRateLimit: 50,
       },
     },
   },
@@ -1965,13 +1942,12 @@ When throttled, API Gateway returns a 429 Too Many Requests response directly �
 
 Some routes need different limits. The invoice send endpoint is more expensive than a simple GET:
 
+Per-route throttling uses the `transform.route.routeSettings` property. The `transform` pattern is how SST exposes CloudFormation properties that don't have a first-class SST API yet.
+
 ```typescript
-// Per-route throttling via the transform property on individual routes
 api.route("POST /workspaces/{workspaceId}/invoices/{invoiceId}/send", {
   handler: "src/functions/invoices/send.handler",
   ...sharedFunctionConfig,
-  // Note: Per-route throttling in HTTP API requires using the transform
-  // property to set route settings directly
   transform: {
     route: {
       routeSettings: {
@@ -2013,7 +1989,9 @@ type RateLimitResult =
  * Sliding window rate limiter backed by DynamoDB.
  * Uses atomic UpdateExpression to increment counter.
  *
- * Note: This adds ~5ms of DynamoDB latency. Only apply to expensive operations.
+ * Adds ~5ms of DynamoDB latency — only apply to expensive operations.
+ * Fails open on DynamoDB errors: if the rate limiter breaks, requests are allowed through
+ * rather than blocking users. A broken rate limiter is bad; a broken API is worse.
  */
 export const checkRateLimit = async (
   config: RateLimitConfig
@@ -2023,8 +2001,6 @@ export const checkRateLimit = async (
   const now = Math.floor(Date.now() / 1000);
   const windowStart = now - config.windowSeconds;
 
-  // TTL-based approach: one item per time window slice
-  // For simplicity, use a fixed minute-based key
   const windowKey = Math.floor(now / config.windowSeconds);
   const itemKey = `RATELIMIT#${config.key}#${windowKey}`;
 
@@ -2076,7 +2052,6 @@ export const checkRateLimit = async (
 
     return { allowed: true };
   } catch {
-    // On DynamoDB failure, fail open (allow the request) — don't block users due to rate limit errors
     return { allowed: true };
   }
 };
@@ -2102,7 +2077,6 @@ export const handler = validateHandler(
     const invoiceId = event.pathParameters?.invoiceId;
     if (!workspaceId || !invoiceId) return res.badRequest("Missing path parameters");
 
-    // Rate limit: max 10 invoice sends per minute per workspace
     const rateLimitResult = await checkRateLimit({
       key: `send-invoice:${workspaceId}`,
       limit: 10,
@@ -2128,12 +2102,11 @@ This adds a DynamoDB round-trip before the main operation. Only apply it to endp
 
 Include `X-RateLimit-*` headers on successful responses too, so clients know how close they are to the limit:
 
-```typescript
-// In your response helper or middleware, add these headers on 200s:
-// X-RateLimit-Limit: 10
-// X-RateLimit-Remaining: 7
-// X-RateLimit-Reset: 1740820860  (Unix timestamp when window resets)
-```
+In your response helper or middleware, add these to successful responses:
+
+- `X-RateLimit-Limit: 10`
+- `X-RateLimit-Remaining: 7`
+- `X-RateLimit-Reset: 1740820860` (Unix timestamp when the current window resets)
 
 Well-behaved API clients read these headers and back off before they get 429s. Document them in your API docs.
 
@@ -2172,14 +2145,10 @@ Not everything should be cached. The decision:
 
 ### Adding CloudFront in front of API Gateway
 
+The `defaultCacheBehavior` uses `CachingDisabled` for all routes (pass-through), with `orderedCacheBehaviors` overriding specific path patterns where caching is safe.
+
 ```typescript
-// sst.config.ts — adding CloudFront
-
-const api = new sst.aws.ApiGatewayV2("RunwayApi", {
-  cors: { /* ... */ },
-});
-
-// Add CloudFront in front of API Gateway
+// sst.config.ts
 const cdn = new sst.aws.CloudFront("RunwayApiCdn", {
   origins: [
     {
@@ -2188,20 +2157,18 @@ const cdn = new sst.aws.CloudFront("RunwayApiCdn", {
     },
   ],
   defaultCacheBehavior: {
-    // Default: no caching (pass through to API Gateway)
     viewerProtocolPolicy: "redirect-to-https",
-    cachePolicy: "CachingDisabled",  // SST named policy
+    cachePolicy: "CachingDisabled",
     originRequestPolicy: "AllViewerExceptHostHeader",
     allowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
     cachedMethods: ["GET", "HEAD"],
   },
   orderedCacheBehaviors: [
-    // Cache workspace detail responses for 5 minutes
     {
-      pathPattern: "/workspaces/*/",  // GET /workspaces/{id}
+      pathPattern: "/workspaces/*/",
       viewerProtocolPolicy: "redirect-to-https",
       compress: true,
-      cachePolicyId: "...", // custom policy (see below)
+      cachePolicyId: "...",
       allowedMethods: ["GET", "HEAD"],
       cachedMethods: ["GET", "HEAD"],
     },
@@ -2216,7 +2183,7 @@ Full CloudFront setup is beyond the scope of this chapter — Chapter 6 covers C
 The simpler approach: set `Cache-Control` headers in Lambda responses and let CloudFront honour them. This works with any CloudFront configuration that's set up to respect origin cache headers.
 
 ```typescript
-// In the workspace get handler
+// src/functions/workspaces/get.ts
 export const handler = validateHandler(
   {},
   async (event) => {
@@ -2226,13 +2193,11 @@ export const handler = validateHandler(
     const workspace = await workspaceService.findById(workspaceId);
     if (!workspace) return res.notFound("Workspace");
 
-    // Add Cache-Control header — CloudFront caches this response
     return {
       ...res.ok(workspace),
       headers: {
         ...res.ok(workspace).headers,
         "Cache-Control": "public, max-age=300, stale-while-revalidate=60",
-        // 5 minutes fresh, then serve stale while revalidating in background
       },
     };
   }
@@ -2263,10 +2228,10 @@ Building APIs is easy. Evolving them without breaking existing clients is hard. 
 
 SST's routing lets you prefix all routes with a version path:
 
-```typescript
-// sst.config.ts — versioned routes
+The routes are defined as a typed array and registered in a loop. This scales well: adding a new v1 route is one line in the array. When you need to add v2, you create a `v2Routes` array alongside it.
 
-// Version 1 routes (current)
+```typescript
+// sst.config.ts
 const v1Routes = [
   ["POST",  "/v1/workspaces",                                     "workspaces/create"],
   ["GET",   "/v1/workspaces/{workspaceId}",                       "workspaces/get"],
@@ -2291,7 +2256,6 @@ for (const [method, path, handlerPath] of v1Routes) {
   });
 }
 
-// Health check — no version prefix, never breaking
 api.route("GET /health", {
   handler: "src/functions/health.handler",
 });
@@ -2386,15 +2350,12 @@ export default $config({
     const table = new sst.aws.Dynamo("RunwayTable", {
       fields: { pk: "string", sk: "string" },
       primaryIndex: { hashKey: "pk", rangeKey: "sk" },
-      // GSIs for common access patterns — defined fully in Chapter 4
       globalIndexes: {
         gsi1: { hashKey: "gsi1pk", rangeKey: "gsi1sk" },
       },
-      // TTL for rate limit entries and temporary data
       ttl: "ttl",
     });
 
-    // S3 buckets — full setup in Chapter 6; defined here so functions can be linked
     const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
     const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
 
@@ -2424,7 +2385,6 @@ export default $config({
       accessLog: isProd
         ? { retention: "1 month" }
         : { retention: "1 week" },
-      // Stage-level throttling
       transform: {
         stage: {
           defaultRouteSettings: {
