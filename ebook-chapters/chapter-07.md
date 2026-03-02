@@ -66,22 +66,17 @@ export default $config({
   async run() {
     // ... existing resources from previous chapters ...
 
-    // Cognito User Pool
     const userPool = new sst.aws.CognitoUserPool("RunwayUserPool", {
       usernames: ["email"],
       triggers: {
-        // Auto-confirm users in non-production (skip email verification)
         ...(($app.stage !== "production") && {
           preSignUp: "src/functions/auth/pre-signup.handler",
         }),
-        // Trigger workspace creation after first sign-up
         postConfirmation: "src/functions/auth/post-confirmation.handler",
       },
     });
 
-    // App client for the frontend
     const userPoolClient = userPool.addClient("RunwayWebClient", {
-      // OAuth flow for hosted UI
       callbackUrls: [
         $app.stage === "production"
           ? "https://app.runway.com/auth/callback"
@@ -94,13 +89,11 @@ export default $config({
       ],
     });
 
-    // Cognito domain for the hosted UI
     const domain = userPool.addDomain("RunwayDomain", {
       prefix: `runway-${$app.stage}`,
     });
 
     const api = new sst.aws.ApiGatewayV2("RunwayApi", {
-      // Attach Cognito as the default authoriser for all routes
       authorizer: {
         type: "user_pool",
         userPool: {
@@ -110,13 +103,11 @@ export default $config({
       },
     });
 
-    // Public routes (no auth required)
     api.route("GET /health", {
       handler: "src/functions/health.handler",
-      auth: { iam: false },  // Override default authoriser
+      auth: { iam: false },
     });
 
-    // Protected routes (Cognito JWT required)
     api.route("GET /workspaces/{workspaceId}", {
       handler: "src/functions/workspaces/get.handler",
       link: [table],
@@ -156,7 +147,6 @@ import { nanoid } from "nanoid";
 export const handler: PostConfirmationTriggerHandler = async (event) => {
   const logger = createLogger();
 
-  // Only fire on sign-up confirmation, not on other triggers
   if (event.triggerSource !== "PostConfirmation_ConfirmSignUp") {
     return event;
   }
@@ -171,18 +161,15 @@ export const handler: PostConfirmationTriggerHandler = async (event) => {
     await createWorkspace({
       workspaceId: nanoid(),
       name: `${name}'s Workspace`,
-      ownerId: userId,  // The Cognito sub — permanent, never changes
+      ownerId: userId,
     });
   } catch (err) {
-    // Log but don't throw — a failed workspace creation shouldn't fail the sign-up
-    // The user can create their workspace on first login instead
     logger.error("Failed to create workspace for new user", {
       userId,
       err: String(err),
     });
   }
 
-  // Cognito triggers must return the event
   return event;
 };
 ```
@@ -196,7 +183,6 @@ The Cognito `sub` is the user's permanent, immutable identifier. Emails can chan
 import type { PreSignUpTriggerHandler } from "aws-lambda";
 
 export const handler: PreSignUpTriggerHandler = async (event) => {
-  // Auto-confirm and auto-verify in non-production stages
   event.response.autoConfirmUser = true;
   event.response.autoVerifyEmail = true;
   return event;
@@ -221,11 +207,11 @@ The shape:
 
 ```typescript
 {
-  sub: "a1b2c3d4-...",          // Cognito user ID — use this as the user identifier
+  sub: "a1b2c3d4-...",
   email: "mike@example.com",
   email_verified: "true",
   iss: "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_xxx",
-  aud: "6xxxxxxxxxxxxxxxxxxx",   // App client ID
+  aud: "6xxxxxxxxxxxxxxxxxxx",
   iat: "1740000000",
   exp: "1740003600",
   "cognito:username": "a1b2c3d4-...",
@@ -240,7 +226,7 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer } from "aws-lambda";
 import { AppError } from "./errors";
 
 export interface AuthUser {
-  sub: string;       // Cognito user ID
+  sub: string;
   email: string;
 }
 
@@ -250,8 +236,6 @@ export function getAuthUser(
   const claims = event.requestContext.authorizer?.jwt?.claims;
 
   if (!claims?.sub || !claims?.email) {
-    // This shouldn't happen if API Gateway authorisation is configured
-    // correctly — but be defensive
     throw new AppError("Missing auth claims", "UNAUTHORIZED", 401);
   }
 
@@ -296,8 +280,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
   const workspace = await getWorkspaceByOwner(workspaceId, user.sub);
 
   if (!workspace) {
-    // Could be not found, or could belong to a different user.
-    // Return 404 in both cases — don't leak existence of other workspaces.
     return notFound("Workspace");
   }
 
@@ -318,7 +300,6 @@ export async function getWorkspaceByOwner(
 ): Promise<WorkspaceItem | null> {
   const workspace = await getWorkspace(workspaceId);
 
-  // Check ownership — don't return the workspace if it belongs to someone else
   if (!workspace || workspace.ownerId !== ownerId) {
     return null;
   }
@@ -399,11 +380,9 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
   const user = getAuthUser(event);
   const workspaceId = event.pathParameters?.workspaceId!;
 
-  // Verify the workspace exists and belongs to this user
   const workspace = await getWorkspaceByOwner(workspaceId, user.sub);
   if (!workspace) return notFound("Workspace");
 
-  // Now safe to query clients — they're scoped to this workspace
   const limit = Number(event.queryStringParameters?.limit ?? 50);
   const cursor = event.queryStringParameters?.cursor;
 
@@ -441,9 +420,7 @@ Runway's clients (the freelancer's customers) also need to log in. They see a re
 Clients use the same User Pool. They're differentiated by a custom attribute:
 
 ```typescript
-// When the freelancer invites a client:
 // src/functions/clients/invite.ts
-
 import type { APIGatewayProxyHandlerV2WithJWTAuthorizer } from "aws-lambda";
 import { CognitoIdentityProviderClient, AdminCreateUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { Resource } from "sst";
@@ -465,8 +442,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
   const client = await getClient(workspaceId, clientId);
   if (!client) return notFound("Client");
 
-  // Create the client's Cognito user
-  // AdminCreateUser sends them a temporary password via email automatically
   await cognito.send(
     new AdminCreateUserCommand({
       UserPoolId: Resource.RunwayUserPool.id,
@@ -474,7 +449,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
       UserAttributes: [
         { Name: "email", Value: client.email },
         { Name: "email_verified", Value: "true" },
-        // Custom attributes to scope their access
         { Name: "custom:role", Value: "client" },
         { Name: "custom:workspaceId", Value: workspaceId },
         { Name: "custom:clientId", Value: clientId },
@@ -512,8 +486,8 @@ export interface AuthUser {
   sub: string;
   email: string;
   role: "owner" | "client";
-  workspaceId?: string;   // Set for client role
-  clientId?: string;      // Set for client role
+  workspaceId?: string;
+  clientId?: string;
 }
 
 export function getAuthUser(
@@ -550,7 +524,6 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
   const clientId = event.pathParameters?.clientId!;
 
   if (user.role === "owner") {
-    // Freelancer: verify they own the workspace containing this client
     const client = await getClientWithOwnerCheck(clientId, user.sub);
     if (!client) return notFound("Client");
 
@@ -559,9 +532,8 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
   }
 
   if (user.role === "client") {
-    // Client user: can only see their own projects
     if (user.clientId !== clientId) {
-      return notFound("Client"); // 404, not 403 — don't leak existence
+      return notFound("Client");
     }
 
     const projects = await listProjects(clientId);
@@ -635,13 +607,11 @@ import {
 const cognito = new CognitoIdentityProviderClient({});
 
 export const handler: PreSignUpTriggerHandler = async (event) => {
-  // Auto-confirm in non-production (from the dev shortcut)
   if (process.env.SST_STAGE !== "production") {
     event.response.autoConfirmUser = true;
     event.response.autoVerifyEmail = true;
   }
 
-  // Link federated sign-in to existing account with the same email
   if (event.triggerSource === "PreSignUp_ExternalProvider") {
     const email = event.request.userAttributes.email;
 
@@ -656,7 +626,6 @@ export const handler: PreSignUpTriggerHandler = async (event) => {
     if (existing.Users?.length) {
       const existingUser = existing.Users[0];
 
-      // Link the Google account to the existing Cognito user
       await cognito.send(
         new AdminLinkProviderForUserCommand({
           UserPoolId: event.userPoolId,
