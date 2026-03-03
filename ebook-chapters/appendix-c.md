@@ -13,52 +13,30 @@ Lambda function with sensible defaults (Node.js runtime, bundled with esbuild, X
 ```typescript
 const fn = new sst.aws.Function("MyFunction", {
   handler: "src/handlers/my-function.handler",
-
-  // Runtime and execution
   runtime: "nodejs22.x",              // default
   timeout: "30 seconds",              // default 10s, max "900 seconds"
   memory: "1024 MB",                  // default 1024 MB
-
-  // Tracing
-  tracing: "active",                  // X-Ray: "active" | "passthrough" | "disabled"
-
-  // VPC (required for RDS access)
+  tracing: "active",                  // "active" | "passthrough" | "disabled"
   vpc,
-
-  // Link other SST resources (auto-generates IAM + injects Resource helper)
   link: [table, bucket, queue, secret],
-
-  // Additional IAM permissions for non-SST resources
   permissions: [
     { actions: ["ses:SendEmail"], resources: ["*"] },
   ],
-
-  // Environment variables (use SST secrets for sensitive values)
   environment: {
     LOG_LEVEL: "INFO",
     SST_STAGE: $app.stage,
   },
-
-  // Bundle config
   nodejs: {
-    install: ["pg"],                  // Force-include packages esbuild might tree-shake
+    install: ["pg"],                  // force-include packages esbuild might tree-shake
     esbuild: {
-      external: ["@prisma/client"],   // Exclude from bundle (e.g. Prisma with binaries)
+      external: ["@prisma/client"],   // exclude from bundle (e.g. Prisma with binaries)
     },
   },
-
-  // Concurrency
-  reservedConcurrency: 100,           // Hard limit on concurrent executions
-  // provisioned: 5,                  // Warm instances (eliminates cold starts, costs $)
+  reservedConcurrency: 100,           // hard limit on concurrent executions
 });
 ```
 
-Access in other functions:
-```typescript
-import { Resource } from "sst";
-// Resource.MyFunction.name — function name
-// Resource.MyFunction.arn  — function ARN
-```
+Access in linked resources: `Resource.MyFunction.name` (function name), `Resource.MyFunction.arn`.
 
 ---
 
@@ -68,53 +46,32 @@ HTTP API backed by API Gateway v2. Fast, cheap (~$1/million requests), WebSocket
 
 ```typescript
 const api = new sst.aws.ApiGatewayV2("Api", {
-  // Custom domain (requires Route53 hosted zone)
-  domain: {
+  domain: {                     // requires Route53 hosted zone
     name: "api.runwayapp.com",
     dns: sst.aws.dns(),
   },
-
-  // CORS (for browser clients)
   cors: {
     allowOrigins: ["https://app.runwayapp.com"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     maxAge: "1 day",
   },
-
-  // Access logging
   accessLog: {
     retention: "1 month",
   },
 });
 
-// Add routes
-api.route("GET /invoices", {
-  handler: "src/handlers/api/invoices.list",
-  link: [table],
-});
+api.route("GET /invoices", { handler: "src/handlers/api/invoices.list", link: [table] });
+api.route("POST /invoices", { handler: "src/handlers/api/invoices.create", link: [table, emailQueue] });
+api.route("GET /invoices/{invoiceId}", { handler: "src/handlers/api/invoices.get", link: [table] });
 
-api.route("POST /invoices", {
-  handler: "src/handlers/api/invoices.create",
-  link: [table, emailQueue],
-});
-
-api.route("GET /invoices/{invoiceId}", {
-  handler: "src/handlers/api/invoices.get",
-  link: [table],
-});
-
-// Route with Cognito JWT authoriser
-api.route("DELETE /invoices/{invoiceId}", {
+api.route("DELETE /invoices/{invoiceId}", {  // with Cognito JWT auth
   handler: "src/handlers/api/invoices.remove",
   link: [table],
   auth: { jwt: { authorizer: myAuthorizer } },
 });
 
-// Catch-all 404
-api.route("$default", {
-  handler: "src/handlers/api/not-found.handler",
-});
+api.route("$default", { handler: "src/handlers/api/not-found.handler" }); // catch-all 404
 ```
 
 Outputs:
@@ -154,40 +111,28 @@ Single DynamoDB table with optional GSIs and streams.
 
 ```typescript
 const table = new sst.aws.Dynamo("RunwayTable", {
-  // Primary key
   fields: {
     PK: "string",
     SK: "string",
-    // GSI key attributes must be listed here
-    GSI1PK: "string",
+    GSI1PK: "string",   // must be listed here alongside primary key fields
     GSI1SK: "string",
   },
   primaryIndex: { hashKey: "PK", rangeKey: "SK" },
-
-  // Global Secondary Indexes
   globalIndexes: {
     GSI1: { hashKey: "GSI1PK", rangeKey: "GSI1SK" },
   },
-
-  // DynamoDB Streams (triggers a Lambda on every write)
-  stream: "new-and-old-images",
-
-  // Removal policy (default: "retain" in prod — table survives sst remove)
+  stream: "new-and-old-images",   // triggers a Lambda on every write
   transform: {
     table: {
       removalPolicy: $app.stage === "production"
-        ? cdk.RemovalPolicy.RETAIN
+        ? cdk.RemovalPolicy.RETAIN     // table survives sst remove in prod
         : cdk.RemovalPolicy.DESTROY,
     },
   },
 });
 ```
 
-In Lambda:
-```typescript
-import { Resource } from "sst";
-Resource.RunwayTable.name  // Table name string
-```
+In Lambda: `Resource.RunwayTable.name` (table name string).
 
 ---
 
@@ -203,12 +148,10 @@ const db = new sst.aws.Aurora("RunwayDb", {
   vpc,
 
   scaling: {
-    min: "0.5 ACU",           // Minimum capacity (0.5 = minimum for Serverless v2)
-    max: "8 ACU",             // Maximum capacity (scales automatically)
+    min: "0.5 ACU",   // minimum for Serverless v2
+    max: "8 ACU",     // scales automatically up to this
   },
-
-  // Credentials auto-generated and stored in Secrets Manager
-  // Access via Resource.RunwayDb.secretArn or Resource.RunwayDb.clusterArn
+  // credentials auto-generated and stored in Secrets Manager
 });
 ```
 
@@ -221,14 +164,7 @@ const fn = new sst.aws.Function("Handler", {
 });
 ```
 
-```typescript
-import { Resource } from "sst";
-Resource.RunwayDb.host        // Aurora cluster endpoint
-Resource.RunwayDb.port        // 5432 (PostgreSQL)
-Resource.RunwayDb.database    // Database name
-Resource.RunwayDb.username    // Admin username
-Resource.RunwayDb.password    // Admin password (from Secrets Manager)
-```
+Linked Resource fields: `host` (cluster endpoint), `port` (5432), `database`, `username`, `password` (from Secrets Manager).
 
 ---
 
@@ -238,10 +174,8 @@ S3 bucket with optional public access, CORS, and versioning.
 
 ```typescript
 const bucket = new sst.aws.Bucket("RunwayDeliverables", {
-  // Public bucket (for public assets — be intentional)
-  public: false,  // default false
+  public: false,  // set true only for intentionally public assets
 
-  // CORS (for direct browser uploads)
   cors: [
     {
       allowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"],
@@ -250,16 +184,12 @@ const bucket = new sst.aws.Bucket("RunwayDeliverables", {
       maxAge: 3600,
     },
   ],
-
-  // Versioning (for audit trail or rollback)
-  versioning: false,  // default false
-
-  // Lifecycle rules
+  versioning: false,
   transform: {
     bucket: (args) => {
       args.lifecycleRules = [{
         expiration: { days: 7 },
-        prefix: "tmp/",   // Auto-delete objects in tmp/ after 7 days
+        prefix: "tmp/",   // deletes objects in tmp/ after 7 days
         status: "Enabled",
       }];
     },
@@ -267,10 +197,7 @@ const bucket = new sst.aws.Bucket("RunwayDeliverables", {
 });
 ```
 
-In Lambda:
-```typescript
-Resource.RunwayDeliverables.name  // Bucket name
-```
+In Lambda: `Resource.RunwayDeliverables.name` (bucket name).
 
 ---
 
@@ -282,17 +209,13 @@ SQS queue with optional DLQ, FIFO, and Lambda subscriber.
 const queue = new sst.aws.Queue("EmailQueue", {
   visibilityTimeout: "120 seconds",
 
-  // Dead-letter queue
   dlq: {
     queue: "EmailDlq",
-    retry: 3,       // Retry count before moving to DLQ
+    retry: 3,       // retry count before DLQ
   },
-
-  // FIFO queue
-  fifo: false,      // default false
+  fifo: false,
 });
 
-// Subscribe a Lambda
 const worker = new sst.aws.Function("EmailWorker", {
   handler: "src/workers/email.handler",
   timeout: "120 seconds",
@@ -302,18 +225,13 @@ const worker = new sst.aws.Function("EmailWorker", {
 worker.subscribe(queue, {
   batchSize: 10,
   reportBatchItemFailures: true,
-
-  // Filter: only process messages with a specific attribute
   filters: [
     { body: { type: ["invoice.paid.email"] } },
   ],
 });
 ```
 
-In Lambda:
-```typescript
-Resource.EmailQueue.url  // SQS queue URL for SendMessageCommand
-```
+In Lambda: `Resource.EmailQueue.url` (queue URL for `SendMessageCommand`).
 
 ---
 
@@ -324,7 +242,6 @@ EventBridge custom event bus.
 ```typescript
 const bus = new sst.aws.Bus("RunwayBus");
 
-// Subscribe a Lambda to specific event patterns
 bus.subscribe("invoice-paid-handler", analyticsWorker, {
   pattern: {
     source: ["runway.invoices"],
@@ -332,7 +249,6 @@ bus.subscribe("invoice-paid-handler", analyticsWorker, {
   },
 });
 
-// Fan-out: multiple subscribers to the same event
 bus.subscribe("invoice-paid-notifications", notificationWorker, {
   pattern: {
     source: ["runway.invoices"],
@@ -341,10 +257,7 @@ bus.subscribe("invoice-paid-notifications", notificationWorker, {
 });
 ```
 
-In Lambda:
-```typescript
-Resource.RunwayBus.name  // Event bus name for PutEventsCommand
-```
+In Lambda: `Resource.RunwayBus.name` (event bus name for `PutEventsCommand`).
 
 ---
 
@@ -354,10 +267,7 @@ EventBridge-scheduled Lambda invocation.
 
 ```typescript
 const chaser = new sst.aws.Cron("InvoiceChaser", {
-  // Cron expression (6-field AWS format)
-  schedule: "cron(0 9 * * ? *)",  // Daily at 9am UTC
-  // or rate expression:
-  // schedule: "rate(1 hour)",
+  schedule: "cron(0 9 * * ? *)",  // daily at 9am UTC; use "rate(1 hour)" for intervals
 
   job: {
     handler: "src/jobs/invoice-chaser.handler",
@@ -392,27 +302,19 @@ Cognito User Pool for authentication.
 
 ```typescript
 const userPool = new sst.aws.CognitoUserPool("RunwayUserPool", {
-  // Email as username
   usernames: ["email"],
-
-  // Allow Cognito to send emails (SES in production)
-  // transform for custom SES sender in prod
-
-  // Triggers
   triggers: {
-    preSignUp: preSignUpFn,       // Validate + auto-confirm
-    postConfirmation: postConfirmFn, // Provision workspace on signup
-    preTokenGeneration: preTokenFn,  // Add custom claims to JWT
+    preSignUp: preSignUpFn,          // validate + auto-confirm
+    postConfirmation: postConfirmFn, // provision workspace on signup
+    preTokenGeneration: preTokenFn,  // add custom claims to JWT
   },
 });
 
 const client = userPool.addClient("RunwayWebClient", {
-  // Token expiry
   accessTokenValidity: cdk.Duration.hours(1),
   idTokenValidity: cdk.Duration.hours(1),
   refreshTokenValidity: cdk.Duration.days(30),
 
-  // OAuth flows
   oAuth: {
     flows: { authorizationCodeGrant: true },
     scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID, cognito.OAuthScope.PROFILE],
@@ -422,11 +324,7 @@ const client = userPool.addClient("RunwayWebClient", {
 });
 ```
 
-Outputs:
-```typescript
-userPool.id       // User Pool ID
-client.id         // App Client ID (audience for JWT validation)
-```
+Outputs: `userPool.id` (User Pool ID), `client.id` (App Client ID — audience for JWT validation).
 
 ---
 
@@ -453,10 +351,7 @@ const fn = new sst.aws.Function("Handler", {
 });
 ```
 
-```typescript
-import { Resource } from "sst";
-Resource.MailgunApiKey.value  // Resolved at runtime from SSM
-```
+In Lambda: `Resource.MailgunApiKey.value` (resolved at runtime from SSM Parameter Store).
 
 ---
 
@@ -466,9 +361,8 @@ Managed VPC for resources that require private networking (Aurora, ElastiCache, 
 
 ```typescript
 const vpc = new sst.aws.Vpc("RunwayVpc", {
-  // SST creates public + private subnets by default
-  // NAT gateway enabled by default (~$32/month per AZ — consider turning off for dev)
   nat: $app.stage === "production" ? "managed" : "ec2",
+  // "managed" = AWS NAT Gateway (~$32/month/AZ); "ec2" = t4g.nano (~$3/month, less HA)
 });
 ```
 
@@ -497,7 +391,6 @@ export default $config({
     };
   },
   async run() {
-    // Apply defaults to all functions
     $transform(sst.aws.Function, (args) => {
       args.runtime ??= "nodejs22.x";
       args.tracing ??= "active";
@@ -519,16 +412,15 @@ export default $config({
 
 `Resource` is type-safe and auto-generated based on what you `link`:
 
-```typescript
-import { Resource } from "sst";
+All fields are only available if the resource is in `link: []`. TypeScript will catch missing links at build time.
 
-// Only available if the resource is in link: []
-Resource.RunwayTable.name    // DynamoDB table name
-Resource.RunwayBus.name      // EventBridge bus name
-Resource.EmailQueue.url      // SQS queue URL
-Resource.RunwayDeliverables.name   // S3 bucket name
-Resource.RunwayDb.host       // Aurora host
-Resource.MailgunApiKey.value // Secret value (SSM Parameter Store)
-```
+| Expression | Value |
+|---|---|
+| `Resource.RunwayTable.name` | DynamoDB table name |
+| `Resource.RunwayBus.name` | EventBridge bus name |
+| `Resource.EmailQueue.url` | SQS queue URL |
+| `Resource.RunwayDeliverables.name` | S3 bucket name |
+| `Resource.RunwayDb.host` | Aurora cluster endpoint |
+| `Resource.MailgunApiKey.value` | Secret value (from SSM) |
 
 If a resource isn't linked, TypeScript will tell you at build time. You won't discover it at 2am when the Lambda explodes.
