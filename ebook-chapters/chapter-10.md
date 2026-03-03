@@ -67,8 +67,6 @@ class Logger {
       ...this.context,
       ...data,
     };
-    // Use console.log for everything — Lambda captures stdout to CloudWatch
-    // Use console.error only for ERROR level so CloudWatch detects it as an error
     if (level === "ERROR") {
       console.error(JSON.stringify(entry));
     } else {
@@ -177,7 +175,7 @@ Fix: include a `correlationId` in every SQS message and EventBridge event. The w
 // src/types/queue-messages.ts — add correlationId to all messages
 export const InvoicePaidEmailMessage = z.object({
   type: z.literal("invoice.paid.email"),
-  correlationId: z.string(), // Traces back to the originating API request
+  correlationId: z.string(),
   invoiceId: z.string(),
   // ...
 });
@@ -187,7 +185,7 @@ export const InvoicePaidEmailMessage = z.object({
 // src/handlers/api/invoices.ts — when queueing the email
 await sendToEmailQueue({
   type: "invoice.paid.email",
-  correlationId: context.awsRequestId, // Lambda's request ID
+  correlationId: context.awsRequestId,
   invoiceId: invoice.invoiceId,
   // ...
 });
@@ -279,8 +277,6 @@ These metrics appear in CloudWatch under the `Runway/Business` namespace within 
 A CloudWatch dashboard that shows Lambda error rate and duration is table stakes. More useful: a dashboard that shows whether the *business* is working.
 
 ```typescript
-// Infrastructure: define the dashboard in SST using the CDK escape hatch.
-// Stack.of() retrieves the CDK stack SST builds internally — pass any .nodes construct.
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cdk from "aws-cdk-lib";
 import { Stack } from "aws-cdk-lib";
@@ -324,7 +320,6 @@ const dashboard = new cloudwatch.Dashboard(stack, "RunwayDashboard", {
     [
       new cloudwatch.GraphWidget({
         title: "API Error Rate",
-        // Access the underlying CDK HttpApi construct via .nodes
         left: [api.nodes.httpApi.metricClientError(), api.nodes.httpApi.metric5XXError()],
       }),
       new cloudwatch.GraphWidget({
@@ -350,10 +345,9 @@ const api = new sst.aws.ApiGatewayV2("Api", {
   // ...
 });
 
-// Enable tracing on individual functions
 const invoiceHandler = new sst.aws.Function("InvoiceHandler", {
   handler: "src/handlers/api/invoices.handler",
-  tracing: "active", // or "passthrough" to respect upstream sampling
+  tracing: "active",
   link: [table],
 });
 ```
@@ -382,11 +376,9 @@ import * as AWSXRay from "aws-xray-sdk-core";
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const segment = AWSXRay.getSegment();
 
-  // Add metadata to the trace
   segment?.addAnnotation("workspaceId", workspaceId);
   segment?.addAnnotation("userId", userId);
 
-  // Time a specific operation
   const subsegment = segment?.addNewSubsegment("listInvoices");
   try {
     const invoices = await listInvoices(workspaceId);
@@ -434,9 +426,9 @@ const errorAlarm = new cloudwatch.Alarm(stack, "ApiErrorAlarm", {
     period: cdk.Duration.minutes(5),
     statistic: "Sum",
   }),
-  threshold: 5, // More than 5 errors in 5 minutes
+  threshold: 5,
   evaluationPeriods: 2,
-  datapointsToAlarm: 2, // Both periods must breach (reduces flapping)
+  datapointsToAlarm: 2,
   comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
   treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
 });
@@ -514,7 +506,6 @@ alertTopic.addSubscription(
   new snsSubscriptions.LambdaSubscription(slackAlerter.nodes.function)
 );
 
-// Wire alarms to the topic
 errorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
 if (dlqAlarm) dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
 ```
