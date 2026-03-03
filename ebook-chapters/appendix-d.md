@@ -8,38 +8,40 @@ The TypeScript patterns used throughout this book, explained in one place. These
 
 `satisfies` checks that a value matches a type without changing the inferred type of the value. The difference matters when you want type safety on the value *and* you want TypeScript to keep inferring the specific type.
 
+Without `satisfies`, an explicit type annotation widens the inferred type:
+
 ```typescript
-// Without satisfies — type is widened to Record<string, string>
 const config: Record<string, string> = {
   region: "eu-west-1",
   stage: "production",
 };
-config.region.toUpperCase(); // Fine
-config.oops;                 // No error — widened to Record<string, string>
+config.region.toUpperCase(); // fine
+config.oops;                 // no error — widened to Record<string, string>
+```
 
-// With satisfies — type is still the object literal type
+With `satisfies`, the type is checked but TypeScript still infers the specific object literal type:
+
+```typescript
 const config = {
   region: "eu-west-1",
   stage: "production",
 } satisfies Record<string, string>;
 
-config.region.toUpperCase(); // Fine — TypeScript knows it's a string
-config.oops;                 // Error — 'oops' does not exist on this type
+config.region.toUpperCase(); // fine — TypeScript knows it's a string
+config.oops;                 // error — 'oops' does not exist on this type
 ```
 
-Where this shows up in Runway: route handler registries, SST config objects, error code maps.
+Where this shows up in Runway: route handler registries, SST config objects, error code maps. Each code key keeps its literal type rather than being widened to `string`:
 
 ```typescript
-// Error codes with satisfies — each code keeps its literal type
 const HTTP_ERRORS = {
   NOT_FOUND: { status: 404, message: "Not found" },
   UNAUTHORIZED: { status: 401, message: "Unauthorized" },
   CONFLICT: { status: 409, message: "Conflict" },
 } satisfies Record<string, { status: number; message: string }>;
 
-// TypeScript infers the specific shape, not just Record<string, ...>
-HTTP_ERRORS.NOT_FOUND.status; // number
-// HTTP_ERRORS.OOPS             // Error at compile time
+HTTP_ERRORS.NOT_FOUND.status; // number (not Record<string, ...>)
+HTTP_ERRORS.OOPS;             // error: property does not exist
 ```
 
 ---
@@ -108,7 +110,6 @@ type UserId = Brand<string, "UserId">;
 type WorkspaceId = Brand<string, "WorkspaceId">;
 type InvoiceId = Brand<string, "InvoiceId">;
 
-// Constructor functions that create branded values
 function toUserId(id: string): UserId {
   return id as UserId;
 }
@@ -127,8 +128,8 @@ function getWorkspace(workspaceId: WorkspaceId, ownerId: UserId): Promise<Worksp
 const userId = toUserId("USER#abc123");
 const workspaceId = toWorkspaceId("WORKSPACE#def456");
 
-getWorkspace(workspaceId, userId); // Fine
-getWorkspace(userId, workspaceId); // Error: Argument of type 'UserId' is not assignable to parameter of type 'WorkspaceId'
+getWorkspace(workspaceId, userId); // fine
+getWorkspace(userId, workspaceId); // error: Argument of type 'UserId' is not assignable to 'WorkspaceId'
 ```
 
 **Where to use brands:** IDs that cross module boundaries, monetary amounts (avoid mixing cents and pounds), anything where passing the wrong primitive would cause silent data corruption.
@@ -141,22 +142,25 @@ getWorkspace(userId, workspaceId); // Error: Argument of type 'UserId' is not as
 
 `any` disables the type checker. `unknown` keeps it engaged.
 
+`any` disables the type checker entirely — TypeScript won't catch errors at the call site:
+
 ```typescript
-// any — no type safety at all
 function processPayload(data: any) {
-  data.invoiceId.toUpperCase(); // TypeScript allows this, even if data.invoiceId is undefined
+  data.invoiceId.toUpperCase(); // allowed even if data.invoiceId is undefined at runtime
 }
+```
 
-// unknown — must narrow before use
+`unknown` requires narrowing before use:
+
+```typescript
 function processPayload(data: unknown) {
-  data.invoiceId; // Error: Object is of type 'unknown'
+  data.invoiceId; // error: Object is of type 'unknown'
 
-  // Must verify shape first
   if (typeof data === "object" && data !== null && "invoiceId" in data) {
     const id = (data as { invoiceId: string }).invoiceId;
   }
 
-  // Better: use Zod to parse and narrow
+  // better: use Zod to parse and narrow in one step
   const payload = PayloadSchema.parse(data);
   payload.invoiceId; // string — safe
 }
@@ -185,14 +189,12 @@ try {
 Generic functions let you write typed utilities that work across multiple types. The pattern appears throughout the book in query builders, pagination, and result wrappers.
 
 ```typescript
-// Typed paginated query result
 interface PageResult<T> {
   items: T[];
   cursor: string | null;
   hasMore: boolean;
 }
 
-// Generic paginator — works for any item type
 async function paginatedQuery<T>(
   params: QueryCommandInput,
   decode: (item: Record<string, unknown>) => T
@@ -206,13 +208,15 @@ async function paginatedQuery<T>(
     hasMore: !!result.LastEvaluatedKey,
   };
 }
+```
 
-// Usage — TypeScript infers the return type
+Usage — TypeScript infers `result.items` as `Workspace[]` from the decode function:
+
+```typescript
 const result = await paginatedQuery(
   { TableName: "RunwayTable", KeyConditionExpression: "PK = :pk", ExpressionAttributeValues: { ":pk": "WORKSPACE#123" } },
-  (item) => WorkspaceSchema.parse(item)  // decode function
+  (item) => WorkspaceSchema.parse(item)
 );
-// result.items is Workspace[]
 ```
 
 ---
@@ -221,15 +225,17 @@ const result = await paginatedQuery(
 
 `as const` makes all values in an object or array their narrowest possible literal type. Useful for configuration, enums, and lookup tables.
 
+Without `as const`, array literals widen to `string[]`, losing literal types:
+
 ```typescript
-// Without as const
 const PLANS = ["free", "pro", "enterprise"];
-// PLANS is string[] — loses the literal types
+// inferred as string[]
+```
 
-// With as const
+With `as const`, the array becomes `readonly ["free", "pro", "enterprise"]`:
+
+```typescript
 const PLANS = ["free", "pro", "enterprise"] as const;
-// PLANS is readonly ["free", "pro", "enterprise"]
-
 type Plan = typeof PLANS[number]; // "free" | "pro" | "enterprise"
 
 function getPlanLimit(plan: Plan): number {
@@ -242,8 +248,8 @@ function getPlanLimit(plan: Plan): number {
   return limits[plan];
 }
 
-getPlanLimit("pro");    // Fine
-getPlanLimit("trial");  // Error: not a valid Plan
+getPlanLimit("pro");    // fine
+getPlanLimit("trial");  // error: not a valid Plan
 ```
 
 ---
@@ -253,28 +259,25 @@ getPlanLimit("trial");  // Error: not a valid Plan
 Conditional types express "if T extends U, then X, else Y." Used internally by TypeScript's utility types and occasionally useful in application code.
 
 ```typescript
-// Extract the success type from a Result union
 type ExtractSuccess<T> = T extends { success: true; data: infer D } ? D : never;
 
 type CreateInvoiceResult =
   | { success: true; data: Invoice }
   | { success: false; error: string };
 
-type InvoiceData = ExtractSuccess<CreateInvoiceResult>; // Invoice
+type InvoiceData = ExtractSuccess<CreateInvoiceResult>; // resolves to Invoice
 ```
 
-**`infer`** captures a type from within a conditional. It's how you extract the return type of a function, the element type of an array, etc.:
+**`infer`** captures a type from within a conditional. It's how you extract the resolved type of a Promise or the element type of an array:
 
 ```typescript
-// The type of the resolved value of a Promise
 type Awaited<T> = T extends Promise<infer U> ? U : T;
-// This is actually built into TypeScript as Awaited<T>
+// built into TypeScript 4.5+ as the Awaited<T> utility type
 
-// The element type of an array
 type ArrayElement<T> = T extends (infer E)[] ? E : never;
 
 type InvoiceList = Invoice[];
-type SingleInvoice = ArrayElement<InvoiceList>; // Invoice
+type SingleInvoice = ArrayElement<InvoiceList>; // resolves to Invoice
 ```
 
 In Runway, conditional types appear in the event catalog typing (Chapter 8) and the generic repository interfaces.
@@ -288,9 +291,12 @@ TypeScript can express string patterns as types.
 ```typescript
 type Stage = "dev" | "staging" | "production";
 type EnvVar = `${Uppercase<Stage>}_DATABASE_URL`;
-// "DEV_DATABASE_URL" | "STAGING_DATABASE_URL" | "PRODUCTION_DATABASE_URL"
+// resolves to "DEV_DATABASE_URL" | "STAGING_DATABASE_URL" | "PRODUCTION_DATABASE_URL"
+```
 
-// DynamoDB key patterns
+The Runway DynamoDB access layer uses template literal types to make key shapes explicit:
+
+```typescript
 type WorkspaceKey = `WORKSPACE#${string}`;
 type ClientKey = `CLIENT#${string}`;
 type InvoiceKey = `INVOICE#${string}`;
@@ -299,8 +305,8 @@ function getInvoiceKey(invoiceId: string): InvoiceKey {
   return `INVOICE#${invoiceId}`;
 }
 
-const key: InvoiceKey = "INVOICE#abc123";    // Fine
-const bad: InvoiceKey = "WORKSPACE#abc123";  // Error: type '"WORKSPACE#..."' is not assignable
+const key: InvoiceKey = "INVOICE#abc123";    // fine
+const bad: InvoiceKey = "WORKSPACE#abc123";  // error: type '"WORKSPACE#..."' is not assignable
 ```
 
 Template literal types don't validate at runtime — they're compile-time only. For runtime validation, use Zod with `.startsWith("INVOICE#")` or a regex.
@@ -312,20 +318,19 @@ Template literal types don't validate at runtime — they're compile-time only. 
 Mapped types create new types by iterating over the keys of an existing type.
 
 ```typescript
-// Make all fields optional (the built-in Partial<T> does this)
-type Partial<T> = { [K in keyof T]?: T[K] };
+type Partial<T> = { [K in keyof T]?: T[K] };   // all fields optional (built-in)
 
-// Make specific fields required
-type RequireFields<T, K extends keyof T> = T & Required<Pick<T, K>>;
+type RequireFields<T, K extends keyof T> = T & Required<Pick<T, K>>;  // specific fields required
 
-// Omit all methods, keep only data fields
-type DataOnly<T> = {
+type DataOnly<T> = {                            // strip all methods, keep data fields only
   [K in keyof T as T[K] extends Function ? never : K]: T[K];
 };
+```
 
-// Runway example: update request type from full entity type
+In Runway, `InvoiceUpdateInput` is derived from the full entity type — optional fields, immutable keys excluded:
+
+```typescript
 type InvoiceUpdateInput = Partial<Omit<Invoice, "invoiceId" | "workspaceId" | "createdAt" | "version">>;
-// Fields that can be updated, all optional, without the immutable fields
 ```
 
 The built-in TypeScript utility types (`Partial`, `Required`, `Readonly`, `Pick`, `Omit`, `Record`, `Exclude`, `Extract`, `NonNullable`, `ReturnType`, `Parameters`) are all implemented as mapped or conditional types. Knowing they exist saves you from writing them.
@@ -337,23 +342,17 @@ The built-in TypeScript utility types (`Partial`, `Required`, `Readonly`, `Pick`
 With `strictNullChecks: true` (part of `strict`), TypeScript tracks `null` and `undefined` separately. Handle them explicitly:
 
 ```typescript
-// Nullish coalescing — use default when null/undefined
-const name = invoice.clientName ?? "Unknown Client";
+const name = invoice.clientName ?? "Unknown Client";  // nullish coalescing: default on null/undefined
 
-// Optional chaining — short-circuit on null/undefined
-const email = user?.profile?.email;  // undefined if any step is null/undefined
+const email = user?.profile?.email;  // optional chaining: undefined if any step is null
 
-// Non-null assertion — use when you know it's not null
-// (but prefer narrowing when possible)
-const id = event.pathParameters!.invoiceId;
+const id = event.pathParameters!.invoiceId;  // non-null assertion: avoid if you can narrow instead
 
-// Better — narrow explicitly
-const id = event.pathParameters?.invoiceId;
+const id = event.pathParameters?.invoiceId;  // better: narrow explicitly
 if (!id) return { statusCode: 400, body: "..." };
 // id is string here, not string | undefined
 
-// Nullish assignment — assign only if currently null/undefined
-options.timeout ??= 5000;
+options.timeout ??= 5000;  // nullish assignment: assign only if currently null/undefined
 ```
 
 **Avoid `!` (non-null assertion)** where possible. It tells the compiler to trust you, not itself. When you're wrong, the crash happens at runtime with no type error to warn you.
@@ -374,22 +373,22 @@ The TypeScript config that makes Runway's Lambda functions safe and fast to buil
     "outDir": "dist",
     "rootDir": "src",
 
-    // Strict mode — all of these matter
+    // strict mode — all of these matter
     "strict": true,
     "noUncheckedIndexedAccess": true,  // array[n] returns T | undefined
     "noImplicitOverride": true,
-    "exactOptionalPropertyTypes": false, // Often too strict for API types
+    "exactOptionalPropertyTypes": false, // often too strict for API types
 
-    // Source maps for readable CloudWatch stack traces
+    // source maps for readable CloudWatch stack traces
     "sourceMap": true,
     "inlineSources": true,
 
-    // Module resolution
+    // module resolution
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true,  // Skip .d.ts checks in node_modules
+    "skipLibCheck": true,  // skip .d.ts checks in node_modules
 
-    // Path aliases (optional)
+    // path aliases (optional)
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
