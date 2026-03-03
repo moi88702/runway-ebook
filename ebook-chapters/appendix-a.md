@@ -75,21 +75,20 @@ Set these up immediately, before deploying anything:
 
 **Billing alarm via CloudWatch:**
 
+Add to a bootstrap stack or deploy manually via the console. Note: billing metrics only exist in `us-east-1` — this must be deployed to that region.
+
 ```typescript
-// Add to a bootstrap stack or manually via console
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as snsSubscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 
-// Must be deployed to us-east-1 — billing metrics only exist there
 const billingTopic = new sns.Topic(stack, "BillingAlertTopic");
 billingTopic.addSubscription(
   new snsSubscriptions.EmailSubscription("you@yourdomain.com")
 );
 
-// Alert at $10 — adjust to your expected spend
-new cloudwatch.Alarm(stack, "BillingAlarm10", {
+new cloudwatch.Alarm(stack, "BillingAlarm10", {  // adjust threshold to your expected spend
   alarmName: "MonthlySpend-$10",
   metric: new cloudwatch.Metric({
     namespace: "AWS/Billing",
