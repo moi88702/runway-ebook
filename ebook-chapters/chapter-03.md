@@ -66,8 +66,9 @@ For Runway — and for the vast majority of application APIs — **use HTTP API*
 
 This matters when you're reading the type definitions. REST API sends `APIGatewayProxyEvent`. HTTP API sends `APIGatewayProxyEventV2`. They're different:
 
+REST API event (`v1` — `APIGatewayProxyEvent`):
+
 ```typescript
-// REST API event (v1) — APIGatewayProxyEvent
 {
   httpMethod: "POST",              // top-level
   path: "/workspaces",             // top-level
@@ -81,8 +82,11 @@ This matters when you're reading the type definitions. REST API sends `APIGatewa
     // ...
   }
 }
+```
 
-// HTTP API event (v2) — APIGatewayProxyEventV2
+HTTP API event (`v2` — `APIGatewayProxyEventV2`):
+
+```typescript
 {
   version: "2.0",
   rawPath: "/workspaces",          // top-level, always present
@@ -2272,11 +2276,15 @@ These are safe to do on `/v1/` without a version bump:
 
 **Add new optional fields to responses.** A field that wasn't there before is fine to add — clients that don't know about it ignore it.
 
-```typescript
-// Before
-type Invoice = { id: string; total: number; status: InvoiceStatus };
+Before:
 
-// After — safe to add, existing clients ignore new fields
+```typescript
+type Invoice = { id: string; total: number; status: InvoiceStatus };
+```
+
+After — safe to add; existing clients ignore new fields:
+
+```typescript
 type Invoice = { id: string; total: number; status: InvoiceStatus; subtotal: number; tax: number };
 ```
 

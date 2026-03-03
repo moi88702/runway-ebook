@@ -344,7 +344,6 @@ function buildConnectionString() {
 Wire it in `sst.config.ts` as a one-off function (not a route):
 
 ```typescript
-// In sst.config.ts run()
 const migrationRunner = new sst.aws.Function("MigrationRunner", {
   handler: "src/functions/migrate.handler",
   link: [db],

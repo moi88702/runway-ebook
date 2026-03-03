@@ -855,8 +855,9 @@ await sfnClient.send(new StartExecutionCommand({
 return { jobId };
 ```
 
+The `GET /jobs/:jobId` handler reads the status record written above:
+
 ```typescript
-// GET /jobs/:jobId
 const item = await docClient.send(new GetCommand({
   TableName: Resource.RunwayTable.name,
   Key: { PK: `JOB#${jobId}`, SK: "STATUS" },

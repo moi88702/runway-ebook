@@ -286,7 +286,6 @@ const stack = Stack.of(invoiceHandler.nodes.function);
 const dashboard = new cloudwatch.Dashboard(stack, "RunwayDashboard", {
   dashboardName: `Runway-${$app.stage}`,
   widgets: [
-    // Row 1: Business health
     [
       new cloudwatch.GraphWidget({
         title: "Invoices Marked Paid (24h)",
@@ -316,7 +315,6 @@ const dashboard = new cloudwatch.Dashboard(stack, "RunwayDashboard", {
         ],
       }),
     ],
-    // Row 2: Infrastructure health
     [
       new cloudwatch.GraphWidget({
         title: "API Error Rate",

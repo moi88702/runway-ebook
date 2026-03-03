@@ -104,7 +104,7 @@ export default $config({
     };
   },
   async run() {
-    // Your AWS resources go here
+    // ...
   },
 });
 ```
