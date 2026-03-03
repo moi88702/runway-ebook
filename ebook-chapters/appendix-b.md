@@ -28,7 +28,7 @@ try {
   if (err.name === "ConditionalCheckFailedException") {
     throw new ConflictError("Workspace already exists");
   }
-  throw err; // Re-throw unexpected errors
+  throw err;
 }
 ```
 
@@ -119,15 +119,19 @@ try {
 2. **Connection pooling in Lambda:** Use `pg-pool` (PostgreSQL) or Prisma's connection pool with a small `connection_limit` in the connection string: `postgresql://...?connection_limit=2`. Each Lambda instance holds at most 2 connections.
 3. **Keep connections alive:** Reuse the Prisma client across warm invocations (instantiate it outside the handler, not inside).
 
+❌ Don't instantiate the client inside the handler — it opens a new connection on every cold start and every warm invocation:
+
 ```typescript
-// Wrong — new client on every invocation
 export const handler = async () => {
-  const prisma = new PrismaClient(); // New connection every cold start AND every invocation
+  const prisma = new PrismaClient();
   const invoices = await prisma.invoice.findMany();
   await prisma.$disconnect();
 };
+```
 
-// Right — client reused across warm invocations
+✅ Instantiate at module level so the client is reused across warm invocations. Don't call `$disconnect()` — keep the connection alive:
+
+```typescript
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient({
@@ -140,7 +144,6 @@ const prisma = new PrismaClient({
 
 export const handler = async () => {
   const invoices = await prisma.invoice.findMany();
-  // Don't disconnect — let the connection stay alive for the next invocation
 };
 ```
 
@@ -158,7 +161,6 @@ export const handler = async () => {
 - [ ] If using a private subnet with no NAT: Lambda can still reach Aurora (same VPC) but cannot reach the internet. Add a VPC endpoint for SSM if you're reading secrets from Parameter Store.
 
 ```typescript
-// SST VPC configuration for Lambda + Aurora in the same VPC
 const vpc = new sst.aws.Vpc("RunwayVpc");
 
 const db = new sst.aws.Aurora("RunwayDb", {
@@ -168,7 +170,7 @@ const db = new sst.aws.Aurora("RunwayDb", {
 
 const invoiceHandler = new sst.aws.Function("InvoiceHandler", {
   handler: "src/handlers/api/invoices.handler",
-  vpc, // Same VPC as Aurora
+  vpc,   // same VPC as Aurora
   link: [db],
 });
 ```
@@ -290,7 +292,7 @@ to perform: dynamodb:Query on resource: arn:aws:dynamodb:eu-west-1:...:table/Run
 return {
   statusCode: 200,
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ data: "..." }), // Must be a string, not an object
+  body: JSON.stringify({ data: "..." }),
 };
 ```
 
