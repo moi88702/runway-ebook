@@ -82,8 +82,6 @@ import { Stack } from "aws-cdk-lib";
 const githubOrg = "your-org";
 const githubRepo = "runway";
 
-// Stack.of() retrieves the CDK stack that SST builds internally.
-// Pass any .nodes construct — here we use the API's underlying CDK construct.
 const stack = Stack.of(api.nodes.httpApi);
 
 const oidcProvider = new iam.OpenIdConnectProvider(stack, "GithubOidcProvider", {
@@ -102,7 +100,6 @@ const deployRole = new iam.Role(stack, "GithubDeployRole", {
     },
   }),
   managedPolicies: [
-    // Be more restrictive in practice — this is broad for simplicity
     iam.ManagedPolicy.fromAwsManagedPolicyName("AdministratorAccess"),
   ],
 });
@@ -358,7 +355,6 @@ async function seed() {
     },
   }));
 
-  // Seed clients, projects, invoices...
   console.log("Preview data seeded");
 }
 
@@ -523,7 +519,7 @@ async function runMigrations() {
   const response = await client.send(
     new InvokeCommand({
       FunctionName: Resource.MigrationRunner.name,
-      InvocationType: "RequestResponse", // Wait for completion
+      InvocationType: "RequestResponse",
       LogType: "Tail",
     })
   );
@@ -533,7 +529,7 @@ async function runMigrations() {
 
   if (response.FunctionError) {
     console.error("Migration failed:", response.FunctionError);
-    process.exit(1); // Fail the CI job
+    process.exit(1);
   }
 
   const result = JSON.parse(
