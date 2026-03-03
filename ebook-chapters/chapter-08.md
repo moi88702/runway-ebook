@@ -128,15 +128,12 @@ export async function sendToEmailQueue(message: QueueMessage): Promise<void> {
     new SendMessageCommand({
       QueueUrl: Resource.EmailQueue.url,
       MessageBody: JSON.stringify(message),
-      // Deduplication for FIFO queues — not needed here, but good habit:
-      // MessageGroupId: message.workspaceId,
     })
   );
 }
 ```
 
 ```typescript
-// Inside your invoice handler, after updating the DB:
 await sendToEmailQueue({
   type: "invoice.paid.email",
   invoiceId: invoice.invoiceId,
@@ -165,7 +162,6 @@ export const handler: SQSHandler = async (event) => {
     event.Records.map(processRecord)
   );
 
-  // Tell SQS which records failed so they can retry individually
   const batchItemFailures = results
     .map((result, index) => ({ result, record: event.Records[index] }))
     .filter(({ result }) => result.status === "rejected")
@@ -180,9 +176,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
   try {
     message = QueueMessage.parse(JSON.parse(record.body));
   } catch (err) {
-    // Unparseable message — send straight to DLQ, no point retrying
     console.error("Invalid message body", { body: record.body, err });
-    return; // Don't throw — we don't want SQS to retry a malformed message
+    return;
   }
 
   switch (message.type) {
@@ -193,7 +188,6 @@ async function processRecord(record: SQSRecord): Promise<void> {
       await sendInvoiceReminderEmail(message);
       break;
     default:
-      // TypeScript will error here if you add a new message type and forget this branch
       const _exhaustive: never = message;
   }
 }
@@ -226,8 +220,6 @@ This means your SQS workers must be **idempotent** — processing the same messa
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 
 async function markEmailSent(invoiceId: string, type: string): Promise<boolean> {
-  // Returns true if this is the first time (i.e., we should send)
-  // Returns false if a record already exists (already sent, skip)
   try {
     await docClient.send(
       new PutCommand({
@@ -243,7 +235,7 @@ async function markEmailSent(invoiceId: string, type: string): Promise<boolean> 
     return true;
   } catch (err: any) {
     if (err.name === "ConditionalCheckFailedException") {
-      return false; // Already sent
+      return false;
     }
     throw err;
   }
@@ -274,8 +266,6 @@ import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
 import { Stack } from "aws-cdk-lib";
 
-// SST v3 builds its components on CDK internally. Access the CDK stack via
-// Stack.of() on any .nodes construct — it walks up the construct tree to find it.
 const emailDlq = emailQueue.nodes.deadLetterQueue;
 if (emailDlq) {
   const stack = Stack.of(emailDlq);
@@ -287,7 +277,6 @@ if (emailDlq) {
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     alarmName: "EmailDlqHasMessages",
   });
-  // Route to SNS → your alerting system
 }
 ```
 
@@ -304,20 +293,20 @@ FIFO queues (First-In, First-Out) guarantee ordering within a message group and 
 
 For Runway's email queue, standard is fine — an email arriving twice is annoying, but the idempotency check handles it. For a payment event queue tied to Stripe webhooks, FIFO is worth considering.
 
+FIFO queues require a `MessageGroupId` (messages within a group are delivered in order) and a `MessageDeduplicationId` (prevents exactly-once violations within a 5-minute window).
+
 ```typescript
-// FIFO queue in SST
 const paymentEventQueue = new sst.aws.Queue("PaymentEventQueue", {
   fifo: true,
   visibilityTimeout: "60 seconds",
 });
 
-// When sending, provide a MessageGroupId (FIFO groups messages within a group)
 await client.send(
   new SendMessageCommand({
     QueueUrl: Resource.PaymentEventQueue.url,
     MessageBody: JSON.stringify(event),
-    MessageGroupId: invoice.invoiceId, // All events for this invoice arrive in order
-    MessageDeduplicationId: `${invoice.invoiceId}-${event.type}-${event.timestamp}`, // Idempotency
+    MessageGroupId: invoice.invoiceId,
+    MessageDeduplicationId: `${invoice.invoiceId}-${event.type}-${event.timestamp}`,
   })
 );
 ```
@@ -354,7 +343,6 @@ const notificationWorker = new sst.aws.Function("NotificationWorker", {
   link: [/* push notification service, etc. */],
 });
 
-// Subscribe workers to specific event patterns
 eventBus.subscribe("invoice.paid", analyticsWorker, {
   pattern: {
     source: ["runway.invoices"],
@@ -409,7 +397,6 @@ export const InvoicePaidEvent = z.object({
 
 export type InvoicePaidEvent = z.infer<typeof InvoicePaidEvent>;
 
-// Event catalog — the full registry of all events Runway emits
 export const RunwayEvents = {
   "invoice.paid": InvoicePaidEvent,
   "invoice.sent": z.object({
@@ -460,7 +447,6 @@ export async function emitEvent<T extends RunwayEventType>(
 ```
 
 ```typescript
-// In the invoice handler:
 await emitEvent("invoice.paid", {
   invoiceId: invoice.invoiceId,
   workspaceId: invoice.workspaceId,
@@ -485,7 +471,6 @@ import { InvoicePaidEvent } from "../types/events";
 export const handler: EventBridgeHandler<"invoice.paid", unknown, void> = async (event) => {
   const detail = InvoicePaidEvent.parse(event.detail);
 
-  // Record the payment for analytics
   await recordPaymentForAnalytics({
     workspaceId: detail.workspaceId,
     amountCents: detail.amountCents,
@@ -507,7 +492,7 @@ eventBus.subscribe("analytics.paid.gbp", analyticsWorker, {
     source: ["runway.invoices"],
     detailType: ["invoice.paid"],
     detail: {
-      currency: ["GBP"], // Only GBP payments
+      currency: ["GBP"],
     },
   },
 });
@@ -547,12 +532,10 @@ EventBridge has a built-in archive and replay feature. Turn it on and every even
 // sst.config.ts — enable archiving on the event bus
 const eventBus = new sst.aws.Bus("RunwayBus");
 
-// SST doesn't expose the archive directly yet — CDK escape hatch.
-// Stack.of() resolves the CDK stack from any .nodes construct.
 import * as events from "aws-cdk-lib/aws-events";
 import { Stack } from "aws-cdk-lib";
 
-const cfnBus = eventBus.nodes.bus; // The underlying CDK construct
+const cfnBus = eventBus.nodes.bus;
 const stack = Stack.of(cfnBus);
 
 new events.CfnArchive(stack, "RunwayBusArchive", {
@@ -580,7 +563,7 @@ SST makes this simple:
 ```typescript
 // sst.config.ts
 const invoiceChaserJob = new sst.aws.Cron("InvoiceChaser", {
-  schedule: "cron(0 9 * * ? *)", // Every day at 9am UTC
+  schedule: "cron(0 9 * * ? *)",
   job: {
     handler: "src/jobs/invoice-chaser.handler",
     timeout: "300 seconds",
@@ -684,12 +667,11 @@ Scheduled jobs are silent by default. They don't surface in your API metrics. Th
 Set up a CloudWatch alarm on Lambda errors for each cron job:
 
 ```typescript
-// After defining invoiceChaserJob in sst.config.ts
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cdk from "aws-cdk-lib";
 import { Stack } from "aws-cdk-lib";
 
-const chaserFunction = invoiceChaserJob.nodes.function; // The Lambda CDK construct
+const chaserFunction = invoiceChaserJob.nodes.function;
 const stack = Stack.of(chaserFunction);
 
 const chaserErrorAlarm = new cloudwatch.Alarm(stack, "InvoiceChaserErrors", {
@@ -722,7 +704,7 @@ Use stage-specific schedules — or just disable the cron in dev:
 const invoiceChaserJob = new sst.aws.Cron("InvoiceChaser", {
   schedule: $app.stage === "production"
     ? "cron(0 9 * * ? *)"
-    : "rate(7 days)", // Run weekly in dev/staging so it exists but doesn't spam
+    : "rate(7 days)",
   job: {
     handler: "src/jobs/invoice-chaser.handler",
     link: [table, emailQueue],
@@ -764,7 +746,6 @@ The invoice report job: instead of generating one massive report, break it by mo
 export const handler: ScheduledHandler = async () => {
   const months = getLast12Months(); // ["2025-02", "2025-03", ... "2026-01"]
 
-  // Enqueue one message per month — each chunk handles in <15 minutes
   for (const month of months) {
     await sendToReportQueue({
       type: "generate.monthly.report",
@@ -774,7 +755,6 @@ export const handler: ScheduledHandler = async () => {
   }
 };
 
-// Separate worker handles each monthly chunk
 export const reportWorker: SQSHandler = async (event) => {
   for (const record of event.Records) {
     const { workspaceId, month } = GenerateMonthlyReportMessage.parse(JSON.parse(record.body));
@@ -815,9 +795,6 @@ const notifyUserFn = new sst.aws.Function("NotifyReportReady", {
   link: [emailQueue],
 });
 
-// SST doesn't yet have a first-class StateMachine component.
-// Use Stack.of() to get the CDK stack from any .nodes construct,
-// then define the state machine directly in CDK.
 const stack = Stack.of(fetchDataFn.nodes.function);
 
 const fetchDataTask = new tasks.LambdaInvoke(stack, "FetchData", {
@@ -856,7 +833,6 @@ When a user triggers a long-running report generation, they need feedback. Three
 **Polling** — simplest. Return a `jobId` immediately, expose a `GET /jobs/:jobId/status` endpoint, let the client poll every few seconds.
 
 ```typescript
-// When triggering the job:
 const jobId = ulid();
 
 await docClient.send(new PutCommand({
@@ -871,7 +847,6 @@ await docClient.send(new PutCommand({
   },
 }));
 
-// Start the state machine
 await sfnClient.send(new StartExecutionCommand({
   stateMachineArn: Resource.ReportStateMachine.arn,
   input: JSON.stringify({ jobId, workspaceId, year }),
@@ -889,7 +864,7 @@ const item = await docClient.send(new GetCommand({
 
 return {
   jobId,
-  status: item.Item?.status ?? "not_found", // pending | running | complete | failed
+  status: item.Item?.status ?? "not_found",
   resultUrl: item.Item?.resultUrl ?? null,
 };
 ```
