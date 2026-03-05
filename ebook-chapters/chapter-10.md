@@ -43,10 +43,11 @@ Structured logging means every log entry is a JSON object with consistent fields
 type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
 interface LogContext {
-  requestId?: string;
-  workspaceId?: string;
-  userId?: string;
-  invoiceId?: string;
+  requestId?:    string;
+  workspaceId?:  string;
+  userId?:       string;
+  invoiceId?:    string;
+  correlationId?: string;
   [key: string]: unknown;
 }
 
@@ -75,22 +76,12 @@ class Logger {
   }
 
   debug(message: string, data?: Record<string, unknown>): void {
-    if (process.env.LOG_LEVEL === "DEBUG") {
-      this.write("DEBUG", message, data);
-    }
+    if (process.env.LOG_LEVEL === "DEBUG") this.write("DEBUG", message, data);
   }
 
-  info(message: string, data?: Record<string, unknown>): void {
-    this.write("INFO", message, data);
-  }
-
-  warn(message: string, data?: Record<string, unknown>): void {
-    this.write("WARN", message, data);
-  }
-
-  error(message: string, data?: Record<string, unknown>): void {
-    this.write("ERROR", message, data);
-  }
+  info(message: string, data?: Record<string, unknown>): void  { this.write("INFO",  message, data); }
+  warn(message: string, data?: Record<string, unknown>): void  { this.write("WARN",  message, data); }
+  error(message: string, data?: Record<string, unknown>): void { this.write("ERROR", message, data); }
 }
 
 export const logger = new Logger();
@@ -99,15 +90,15 @@ export const logger = new Logger();
 Using it in a handler:
 
 ```typescript
-// src/handlers/api/invoices.ts
+// src/functions/invoices/list.ts
 import { logger } from "../../lib/logger";
-import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
+import type { ValidatedHandler } from "../../lib/handler";
 
-export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
+export const handler: ValidatedHandler = async (event, context) => {
   const log = logger.withContext({
     requestId: context.awsRequestId,
-    path: event.rawPath,
-    method: event.requestContext.http.method,
+    path:      event.rawPath,
+    method:    event.requestContext.http.method,
   });
 
   const { workspaceId } = event.pathParameters ?? {};
@@ -126,14 +117,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   } catch (err) {
     scopedLog.error("Failed to fetch invoices", {
       error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
+      stack: err instanceof Error ? err.stack  : undefined,
     });
     return { statusCode: 500, body: JSON.stringify({ error: "Internal server error" }) };
   }
 };
 ```
 
-Every log entry for this request now has `requestId`, `workspaceId`, `path`, and `method`. Filter by `workspaceId` in CloudWatch Logs Insights and every relevant log line appears.
+Every log entry for this request now has `requestId`, `workspaceId`, `path`, and `method`. Filter by `workspaceId` in CloudWatch Logs Insights and every relevant log line appears instantly.
 
 ### CloudWatch Logs Insights Queries Worth Saving
 
@@ -157,86 +148,160 @@ fields @timestamp, path, @duration, workspaceId
 | limit 20
 
 -- Invoice chaser job history
-fields @timestamp, sent, skipped, total
+fields @timestamp, message, sent, skipped, total
 | filter message = "Invoice chaser complete"
 | sort @timestamp desc
 | limit 20
+
+-- Trace ID lookup (find all logs for one request)
+fields @timestamp, level, message, workspaceId
+| filter @xrayTraceId = "1-abc123-..."
+| sort @timestamp asc
 ```
 
-Save these as named queries in CloudWatch (Logs Insights → Saved queries). When something breaks at 11pm you want to click "run query" not reconstruct the syntax from memory.
+Save these as named queries in CloudWatch (Logs Insights → Saved queries). When something breaks at 11pm you want to click "run query," not reconstruct the syntax from memory.
 
 ### Correlation IDs Across Service Boundaries
 
-When an API request triggers an SQS message that triggers a worker Lambda, the `requestId` from the original API call isn't carried forward. You lose the thread.
+When an API request triggers an SQS message that triggers a worker Lambda, the `requestId` from the original API call isn't carried forward automatically. You lose the thread.
 
 Fix: include a `correlationId` in every SQS message and EventBridge event. The worker logs with that ID.
 
 ```typescript
-// src/types/queue-messages.ts — add correlationId to all messages
-export const InvoicePaidEmailMessage = z.object({
-  type: z.literal("invoice.paid.email"),
+// src/types/queue-messages.ts — add correlationId to all message types
+export const InvoicePaidEmailSchema = z.object({
+  type:          z.literal("invoice.paid.email"),
   correlationId: z.string(),
-  invoiceId: z.string(),
-  // ...
+  invoiceId:     z.string(),
+  clientEmail:   z.string(),
+  clientName:    z.string(),
 });
 ```
 
 ```typescript
-// src/handlers/api/invoices.ts — when queueing the email
+// src/functions/invoices/update.ts — include the Lambda request ID when queuing
 await sendToEmailQueue({
-  type: "invoice.paid.email",
+  type:          "invoice.paid.email",
   correlationId: context.awsRequestId,
-  invoiceId: invoice.invoiceId,
-  // ...
+  invoiceId:     invoice.invoiceId,
+  clientEmail:   invoice.clientEmail,
+  clientName:    invoice.clientName,
 });
 ```
 
 ```typescript
-// src/workers/email.ts — log with the correlation ID
+// src/workers/email.ts — log with the correlation ID from the original request
 const scopedLog = logger.withContext({
   correlationId: message.correlationId,
-  invoiceId: message.invoiceId,
+  invoiceId:     message.invoiceId,
+  type:          message.type,
 });
 scopedLog.info("Processing email");
 ```
 
-Now you can search CloudWatch for a `correlationId` and see the full chain: API handler → queue send → worker processing → email sent. One query, the whole story.
+Now search CloudWatch for a `correlationId` value and see the full chain: API handler → queue send → worker processing → email sent. One query, the whole story.
 
 ---
 
-## 10.3 Custom CloudWatch Metrics
+## 10.3 Log Retention and Cost Management
+
+CloudWatch Logs default retention is *never expire*. Every `console.log` your Lambda emits is kept forever at $0.50/GB stored per month. Left unconfigured, a busy production system accumulates gigabytes of logs that nobody reads, and you notice when the AWS bill arrives.
+
+Configure retention in `sst.config.ts` using Pulumi's `aws.cloudwatch.LogGroup` resource:
+
+```typescript
+// sst.config.ts — set retention on all Lambda log groups
+import * as aws from "@pulumi/aws";
+
+// Helper: create a log group with retention for any SST function
+function withRetention(fn: sst.aws.Function, retentionDays = 30) {
+  return new aws.cloudwatch.LogGroup(`${fn.name}Logs`, {
+    name:            $interpolate`/aws/lambda/${fn.nodes.function.name}`,
+    retentionInDays: retentionDays,
+  });
+}
+
+// Apply to each function after defining it
+withRetention(invoiceHandler, 30);
+withRetention(emailWorker,    14);
+withRetention(invoiceChaser,  90);  // Keep cron logs longer for audit purposes
+```
+
+Alternatively, SST's `Function` component exposes a `transform` property to configure the underlying `aws.lambda.Function` Pulumi resource. For log groups, the explicit `withRetention` helper is clearer.
+
+### What to retain and for how long
+
+| Log group | Retention | Reason |
+|-----------|-----------|--------|
+| API handlers | 30 days | Enough to investigate any reported issue |
+| SQS workers | 14 days | Short-lived processing, rarely needed beyond a week |
+| Cron jobs | 90 days | Audit trail for payment-adjacent automation |
+| Migration runner | 1 year | Schema change history has compliance value |
+| Staging | 7 days | Cheap, infrequently referenced |
+
+One month for production API logs covers every realistic incident investigation window while keeping storage costs reasonable.
+
+### Querying Logs from the CLI
+
+The console is fine for one-off queries. For scripts, automation, or during an incident when you don't want to navigate a UI, use the CLI:
+
+```bash
+# Live tail — equivalent to sst dev log streaming for a deployed function
+aws logs tail /aws/lambda/production-runway-InvoiceHandler \
+  --follow \
+  --format short
+
+# Filter for errors in the last 30 minutes
+aws logs filter-log-events \
+  --log-group-name /aws/lambda/production-runway-InvoiceHandler \
+  --start-time $(date -d '30 minutes ago' +%s000) \
+  --filter-pattern '{ $.level = "ERROR" }'
+
+# Run a Logs Insights query and wait for results
+aws logs start-query \
+  --log-group-name /aws/lambda/production-runway-InvoiceHandler \
+  --start-time $(date -d '1 hour ago' +%s) \
+  --end-time $(date +%s) \
+  --query-string 'fields @timestamp, message, workspaceId | filter level = "ERROR" | limit 20'
+
+# (copy the queryId from the response, then:)
+aws logs get-query-results --query-id <queryId>
+```
+
+Add the most-used commands to your RUNBOOK.md so the right flags are one paste away during an incident.
+
+---
+
+## 10.4 Custom CloudWatch Metrics
 
 Lambda's built-in metrics (error count, duration, throttles) tell you about the infrastructure. They don't tell you about the business.
 
-"Invoice chaser sent 47 emails" is a business metric. "Payment success rate by plan tier" is a business metric. "New workspace signups per hour" is a business metric. None of these come free — you have to emit them.
+"Invoice chaser sent 47 emails" is a business metric. "Payment success rate" is a business metric. "New workspace signups per hour" is a business metric. None of these come for free — you have to emit them.
 
-### Emitting Custom Metrics
+### Emitting Custom Metrics with EMF
 
-The cheapest way to emit custom CloudWatch metrics from Lambda is the Embedded Metric Format (EMF). You log a specially formatted JSON entry and CloudWatch extracts metrics from it automatically. No separate API call, no cost per metric write (it's included in your log ingestion).
+The cheapest way to emit custom CloudWatch metrics from Lambda is the Embedded Metric Format (EMF). You log a specially formatted JSON entry and CloudWatch extracts metrics from it automatically. No separate API call, no extra cost per metric write — it's included in your log ingestion.
 
 ```typescript
 // src/lib/metrics.ts
 interface MetricEntry {
-  name: string;
-  value: number;
-  unit?: "Count" | "Milliseconds" | "Bytes" | "Percent";
+  name:        string;
+  value:       number;
+  unit?:       "Count" | "Milliseconds" | "Bytes" | "Percent";
   dimensions?: Record<string, string>;
 }
 
 export function emitMetric(metric: MetricEntry): void {
+  const dimensionKeys = Object.keys(metric.dimensions ?? {});
+
   const emf = {
     _aws: {
       Timestamp: Date.now(),
       CloudWatchMetrics: [
         {
-          Namespace: "Runway/Business",
-          Dimensions: [Object.keys(metric.dimensions ?? {})],
-          Metrics: [
-            {
-              Name: metric.name,
-              Unit: metric.unit ?? "Count",
-            },
-          ],
+          Namespace:  "Runway/Business",
+          Dimensions: [dimensionKeys],
+          Metrics:    [{ Name: metric.name, Unit: metric.unit ?? "Count" }],
         },
       ],
     },
@@ -248,138 +313,341 @@ export function emitMetric(metric: MetricEntry): void {
 }
 ```
 
+Using it in the invoice chaser:
+
 ```typescript
 // src/jobs/invoice-chaser.ts — emit metrics after the run
+logger.info("Invoice chaser complete", { sent, skipped, total: overdueInvoices.length });
+
 emitMetric({
-  name: "InvoiceChaserEmailsSent",
-  value: sent,
+  name:       "InvoiceChaserEmailsSent",
+  value:      sent,
   dimensions: { Stage: process.env.SST_STAGE ?? "unknown" },
 });
 
 emitMetric({
-  name: "OverdueInvoiceCount",
-  value: overdueInvoices.length,
+  name:       "OverdueInvoiceCount",
+  value:      overdueInvoices.length,
   dimensions: { Stage: process.env.SST_STAGE ?? "unknown" },
 });
 ```
 
+In the email worker:
+
 ```typescript
-// src/workers/email.ts — track email success/failure
-emitMetric({ name: "EmailSent", value: 1, dimensions: { Type: message.type } });
+// src/workers/email.ts — track per-type success/failure
+emitMetric({ name: "EmailSent",   value: 1, dimensions: { Type: message.type } });
 // or on failure:
 emitMetric({ name: "EmailFailed", value: 1, dimensions: { Type: message.type } });
 ```
 
 These metrics appear in CloudWatch under the `Runway/Business` namespace within a few minutes. Build dashboards and alarms on top of them.
 
-### Dashboards That Actually Help
-
-A CloudWatch dashboard that shows Lambda error rate and duration is table stakes. More useful: a dashboard that shows whether the *business* is working.
-
-```typescript
-import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
-import * as cdk from "aws-cdk-lib";
-import { Stack } from "aws-cdk-lib";
-
-const stack = Stack.of(invoiceHandler.nodes.function);
-
-const dashboard = new cloudwatch.Dashboard(stack, "RunwayDashboard", {
-  dashboardName: `Runway-${$app.stage}`,
-  widgets: [
-    [
-      new cloudwatch.GraphWidget({
-        title: "Invoices Marked Paid (24h)",
-        left: [new cloudwatch.Metric({
-          namespace: "Runway/Business",
-          metricName: "InvoicePaid",
-          statistic: "Sum",
-          period: cdk.Duration.hours(1),
-          dimensionsMap: { Stage: $app.stage },
-        })],
-      }),
-      new cloudwatch.GraphWidget({
-        title: "Email Send Rate",
-        left: [
-          new cloudwatch.Metric({
-            namespace: "Runway/Business",
-            metricName: "EmailSent",
-            statistic: "Sum",
-            period: cdk.Duration.minutes(15),
-          }),
-          new cloudwatch.Metric({
-            namespace: "Runway/Business",
-            metricName: "EmailFailed",
-            statistic: "Sum",
-            period: cdk.Duration.minutes(15),
-          }),
-        ],
-      }),
-    ],
-    [
-      new cloudwatch.GraphWidget({
-        title: "API Error Rate",
-        left: [api.nodes.httpApi.metricClientError(), api.nodes.httpApi.metric5XXError()],
-      }),
-      new cloudwatch.GraphWidget({
-        title: "Lambda Duration p99",
-        left: [invoiceHandler.nodes.function.metricDuration({ statistic: "p99" })],
-      }),
-    ],
-  ],
-});
-```
-
-The first row answers "is the product working?" The second row answers "is the infrastructure healthy?" Keep them separate — a spike in Lambda duration might not cause errors, but a spike in business errors usually will.
-
 ---
 
-## 10.4 Distributed Tracing with X-Ray
+## 10.5 CloudWatch Dashboards and Alarms
 
-X-Ray gives you end-to-end traces across Lambda, API Gateway, DynamoDB, and SQS. Enable it in SST:
+SST v3 uses Pulumi under the hood, so infrastructure resources — including CloudWatch dashboards, alarms, and SNS topics — are defined using Pulumi's `aws` provider directly. No CDK imports needed.
 
-```typescript
-// sst.config.ts — enable X-Ray on all functions
-const api = new sst.aws.ApiGatewayV2("Api", {
-  // ...
-});
-
-const invoiceHandler = new sst.aws.Function("InvoiceHandler", {
-  handler: "src/handlers/api/invoices.handler",
-  tracing: "active",
-  link: [table],
-});
-```
-
-Or enable it globally via the `transform` option:
+### Alarms
 
 ```typescript
-// sst.config.ts
-app.transform({
-  function: {
-    tracing: "active",
+// sst.config.ts — define alarms after all functions are created
+import * as aws from "@pulumi/aws";
+
+// ── API error rate ──────────────────────────────────────────────────────────
+const apiErrorAlarm = new aws.cloudwatch.MetricAlarm("ApiErrorAlarm", {
+  alarmName:          `${$app.stage}-RunwayApiErrors`,
+  comparisonOperator: "GreaterThanOrEqualToThreshold",
+  evaluationPeriods:  2,
+  datapointsToAlarm:  2,
+  metricName:         "Errors",
+  namespace:          "AWS/Lambda",
+  period:             300,  // 5 minutes
+  statistic:          "Sum",
+  threshold:          5,
+  treatMissingData:   "notBreaching",
+  dimensions: {
+    FunctionName: invoiceHandler.nodes.function.name,
+  },
+});
+
+// ── Email DLQ depth ─────────────────────────────────────────────────────────
+const emailDlqAlarm = new aws.cloudwatch.MetricAlarm("EmailDlqAlarm", {
+  alarmName:          `${$app.stage}-EmailDlqHasMessages`,
+  comparisonOperator: "GreaterThanOrEqualToThreshold",
+  evaluationPeriods:  1,
+  datapointsToAlarm:  1,
+  metricName:         "ApproximateNumberOfMessagesVisible",
+  namespace:          "AWS/SQS",
+  period:             300,
+  statistic:          "Sum",
+  threshold:          1,
+  treatMissingData:   "notBreaching",
+  dimensions: {
+    QueueName: emailQueue.nodes.deadLetterQueue.name,
+  },
+});
+
+// ── Invoice chaser duration approaching timeout ─────────────────────────────
+const chaserTimeoutAlarm = new aws.cloudwatch.MetricAlarm("InvoiceChaserDurationWarning", {
+  alarmName:          `${$app.stage}-InvoiceChaserSlowdown`,
+  comparisonOperator: "GreaterThanOrEqualToThreshold",
+  evaluationPeriods:  1,
+  datapointsToAlarm:  1,
+  metricName:         "Duration",
+  namespace:          "AWS/Lambda",
+  period:             900,  // 15 minutes (matches cron frequency)
+  extendedStatistic:  "p99",
+  threshold:          240_000,  // 240s = 80% of 300s timeout
+  treatMissingData:   "notBreaching",
+  dimensions: {
+    FunctionName: invoiceChaserJob.nodes.function.name,
   },
 });
 ```
 
-With tracing enabled, every Lambda invocation creates a trace segment. DynamoDB calls within the Lambda create sub-segments automatically (the AWS SDK instruments itself when X-Ray is active). You get timing for the full request without any code changes.
+`datapointsToAlarm: 2` with `evaluationPeriods: 2` means two consecutive bad data points are required before the alarm fires. One noisy data point doesn't wake anyone up.
+
+### Routing Alarms to Slack
+
+Create an SNS topic and a Lambda that forwards alarm messages to a Slack webhook:
+
+```typescript
+// sst.config.ts
+const alertTopic = new aws.sns.Topic("AlertTopic", {
+  name: `${$app.stage}-runway-alerts`,
+});
+
+const slackAlerter = new sst.aws.Function("SlackAlerter", {
+  handler:     "src/workers/slack-alert.handler",
+  environment: { SLACK_WEBHOOK_URL: process.env.SLACK_WEBHOOK_URL ?? "" },
+});
+
+new aws.sns.TopicSubscription("SlackAlerterSubscription", {
+  topic:    alertTopic.arn,
+  protocol: "lambda",
+  endpoint: slackAlerter.nodes.function.arn,
+});
+
+// Allow SNS to invoke the Lambda
+new aws.lambda.Permission("SlackAlerterSnsPermission", {
+  action:    "lambda:InvokeFunction",
+  function:  slackAlerter.nodes.function.name,
+  principal: "sns.amazonaws.com",
+  sourceArn: alertTopic.arn,
+});
+
+// Point alarms at the topic
+new aws.cloudwatch.MetricAlarmAlarmAction("ApiErrorAlarmAction", {
+  alarmArn:        apiErrorAlarm.arn,
+  alarmActionArns: [alertTopic.arn],
+});
+```
+
+The Slack alert Lambda:
+
+```typescript
+// src/workers/slack-alert.ts
+import type { SNSHandler } from "aws-lambda";
+
+export const handler: SNSHandler = async (event) => {
+  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  for (const record of event.Records) {
+    const alarm = JSON.parse(record.Sns.Message) as {
+      AlarmName:      string;
+      NewStateValue:  "ALARM" | "OK" | "INSUFFICIENT_DATA";
+      NewStateReason: string;
+      AWSAccountId:   string;
+    };
+
+    const emoji   = alarm.NewStateValue === "ALARM" ? "🚨" : "✅";
+    const color   = alarm.NewStateValue === "ALARM" ? "danger" : "good";
+    const region  = record.Sns.TopicArn.split(":")[3];
+    const alarmUrl =
+      `https://${region}.console.aws.amazon.com/cloudwatch/home` +
+      `#alarmsV2:alarm/${encodeURIComponent(alarm.AlarmName)}`;
+
+    await fetch(webhookUrl, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        attachments: [
+          {
+            color,
+            title:      `${emoji} ${alarm.AlarmName}`,
+            text:       alarm.NewStateReason,
+            title_link: alarmUrl,
+            footer:     `AWS ${alarm.AWSAccountId} · ${region}`,
+          },
+        ],
+      }),
+    });
+  }
+};
+```
+
+The alarm message links directly to the CloudWatch alarm in the console. One click from Slack to the relevant alarm view.
+
+### Dashboard
+
+```typescript
+// sst.config.ts — CloudWatch dashboard
+const stage = $app.stage;
+
+const dashboard = new aws.cloudwatch.Dashboard("RunwayDashboard", {
+  dashboardName: `Runway-${stage}`,
+  dashboardBody: $jsonStringify({
+    widgets: [
+      // Row 1: Business metrics
+      {
+        type: "metric",
+        x: 0, y: 0, width: 12, height: 6,
+        properties: {
+          title:  "Invoices Paid (24h)",
+          view:   "timeSeries",
+          stacked: false,
+          metrics: [[
+            "Runway/Business", "InvoicePaid",
+            "Stage", stage,
+            { stat: "Sum", period: 3600 },
+          ]],
+        },
+      },
+      {
+        type: "metric",
+        x: 12, y: 0, width: 12, height: 6,
+        properties: {
+          title:  "Email Send Rate",
+          view:   "timeSeries",
+          metrics: [
+            ["Runway/Business", "EmailSent",   "Type", "invoice.paid.email",     { stat: "Sum", period: 900 }],
+            ["Runway/Business", "EmailFailed",  "Type", "invoice.paid.email",    { stat: "Sum", period: 900 }],
+            ["Runway/Business", "EmailSent",   "Type", "invoice.reminder.email", { stat: "Sum", period: 900 }],
+          ],
+        },
+      },
+      // Row 2: Infrastructure health
+      {
+        type: "metric",
+        x: 0, y: 6, width: 12, height: 6,
+        properties: {
+          title:  "API Error Rate",
+          view:   "timeSeries",
+          metrics: [
+            ["AWS/Lambda", "Errors",       "FunctionName", invoiceHandler.nodes.function.name, { stat: "Sum", period: 300 }],
+            ["AWS/Lambda", "Throttles",    "FunctionName", invoiceHandler.nodes.function.name, { stat: "Sum", period: 300 }],
+          ],
+        },
+      },
+      {
+        type: "metric",
+        x: 12, y: 6, width: 12, height: 6,
+        properties: {
+          title:  "Invoice Handler Duration",
+          view:   "timeSeries",
+          metrics: [
+            ["AWS/Lambda", "Duration", "FunctionName", invoiceHandler.nodes.function.name, { stat: "p99", period: 300 }],
+            ["AWS/Lambda", "Duration", "FunctionName", invoiceHandler.nodes.function.name, { stat: "p50", period: 300 }],
+          ],
+        },
+      },
+    ],
+  }),
+});
+```
+
+The first row answers "is the product working?" The second row answers "is the infrastructure healthy?" Keep them visually separate — Lambda duration anomalies don't always cause business errors, but business metric anomalies almost always point to broken infrastructure.
+
+### What Not to Alert On
+
+An alert should mean: "you need to look at this right now." If alerts fire for things that sort themselves out, or fire multiple times for the same issue, or fire at 3am for something that can wait until morning, they stop meaning anything. Alert fatigue is real and it kills incident response.
+
+Do not alert on:
+- Individual 4xx errors (clients send bad requests — this is normal)
+- Lambda cold starts (expected, usually sub-second, not actionable)
+- Lambda throttles under 10 per minute (burstable, recovers without intervention)
+- DynamoDB consumed capacity approaching provisioned (irrelevant with on-demand billing)
+- Any metric you'd habitually snooze
+
+Start with the four alarms in this chapter and add more only when a production incident reveals a specific gap that an alarm would have closed.
+
+---
+
+## 10.6 Distributed Tracing with X-Ray
+
+X-Ray gives you end-to-end traces across Lambda, API Gateway, DynamoDB, and SQS. Enable it in `sst.config.ts`:
+
+```typescript
+// sst.config.ts — enable X-Ray on specific functions
+const invoiceHandler = new sst.aws.Function("InvoiceHandler", {
+  handler: "src/functions/invoices/list.handler",
+  tracing: "active",
+  link:    [table, emailQueue],
+});
+```
+
+Or enable it globally for all functions using the transform option:
+
+```typescript
+// sst.config.ts — global X-Ray tracing
+app.transform({
+  function: (args) => {
+    args.tracing = "active";
+  },
+});
+```
+
+With `tracing: "active"`, every Lambda invocation creates a trace segment. DynamoDB and SQS calls within the Lambda create sub-segments automatically — the AWS SDK instruments itself when X-Ray is enabled. You get timing breakdowns for the full request without any code changes.
+
+### X-Ray Sampling Rules
+
+By default, X-Ray samples 5% of requests. For a low-traffic service like a new Runway deployment, 5% means you'll see traces for about 1 in 20 invocations — enough to get latency data, but you'll miss most individual failures.
+
+Configure a sampling rule that captures more of the interesting traffic:
+
+```typescript
+// sst.config.ts
+const samplingRule = new aws.xray.SamplingRule("RunwaySamplingRule", {
+  ruleName:     "RunwayDefaultRule",
+  priority:     1000,
+  reservoirSize: 5,      // Always sample this many req/second (reservoir)
+  fixedRate:    0.10,    // Then sample 10% of remaining requests
+  host:         "*",
+  httpMethod:   "*",
+  urlPath:      "*",
+  serviceName:  "*",
+  serviceType:  "*",
+  resourceArn:  "*",
+  version:      1,
+});
+```
+
+`reservoirSize: 5` means the first 5 requests per second are always sampled regardless of `fixedRate`. This ensures you never completely miss a burst of errors even at high traffic. `fixedRate: 0.10` samples 10% of everything else.
+
+For error investigation, you don't need to change sampling rules — X-Ray always records 100% of errored requests regardless of the sampling rate.
 
 ### Annotating Traces
 
-Automatic instrumentation captures timings. Manual annotations add context — the kind that makes "find the slow request" a query rather than a guess.
+Automatic instrumentation captures timings. Manual annotations add business context that makes traces searchable.
 
 ```typescript
-// src/handlers/api/invoices.ts
+// src/functions/invoices/list.ts
 import * as AWSXRay from "aws-xray-sdk-core";
 
-export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
+export const handler: ValidatedHandler = async (event, context) => {
   const segment = AWSXRay.getSegment();
 
+  // Annotations are indexed — you can filter traces by these in the X-Ray console
   segment?.addAnnotation("workspaceId", workspaceId);
-  segment?.addAnnotation("userId", userId);
+  segment?.addAnnotation("userId",      userId);
 
   const subsegment = segment?.addNewSubsegment("listInvoices");
   try {
     const invoices = await listInvoices(workspaceId);
+    // Metadata is not indexed but shows in the trace detail view
     subsegment?.addMetadata("count", invoices.length);
     return { statusCode: 200, body: JSON.stringify({ invoices }) };
   } finally {
@@ -388,7 +656,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
-With `workspaceId` as an annotation, you can filter the X-Ray trace map to show only requests for a specific workspace. With custom subsegments, you can see that `listInvoices` is taking 340ms while the rest of the handler is under 10ms.
+With `workspaceId` as an annotation, you can filter the X-Ray trace list to show only requests from a specific workspace — essential for investigating a customer complaint.
 
 ### Reading a Trace Map
 
@@ -396,175 +664,138 @@ The X-Ray service map in the AWS console shows nodes (services) and edges (calls
 
 ```
 [API Gateway] → [Invoice Lambda] → [DynamoDB]
-                                 → [SQS]
+                                 ↘ [SQS: EmailQueue]
                                        ↓
                                [Email Worker Lambda]
 ```
 
-Thick edges mean high call volume. Red edges mean errors. High latency edges are highlighted. Click any node to see its error rate, latency distribution, and sample traces.
+Thick edges mean high call volume. Red edges mean errors. Slow edges are highlighted in amber. Click any edge to see the call breakdown, then click any node to see its error rate, latency distribution, and sample traces.
 
-When investigating an incident: look for red edges first, then check the slowest traces on the highlighted edges, then read the logs for the request IDs in those traces.
+When investigating an incident: red edges first, then slowest traces on the highlighted edges, then read the full logs for the request IDs in those traces.
 
 ---
 
-## 10.5 Alerting That Doesn't Cry Wolf
+## 10.7 Lambda Insights
 
-An alert should mean: "you need to look at this now." If alerts fire for things that sort themselves out, or fire multiple times for the same issue, or fire at 3am for something that can wait until morning, they stop meaning anything. Alert fatigue is real and it kills incident response.
+Lambda Insights is an enhanced monitoring feature from AWS that captures performance metrics not available in the standard Lambda metrics: CPU usage, memory utilisation, initialisation duration (cold start time), and network I/O.
 
-The minimum alerting surface for Runway:
-
-### Lambda Error Rate
+Enable it in `sst.config.ts`:
 
 ```typescript
 // sst.config.ts
-// stack is already defined above via Stack.of(invoiceHandler.nodes.function)
-const errorAlarm = new cloudwatch.Alarm(stack, "ApiErrorAlarm", {
-  alarmName: `${$app.stage}-RunwayApiErrors`,
-  metric: invoiceHandler.nodes.function.metricErrors({
-    period: cdk.Duration.minutes(5),
-    statistic: "Sum",
-  }),
-  threshold: 5,
-  evaluationPeriods: 2,
-  datapointsToAlarm: 2,
-  comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-});
-```
-
-Set `threshold` based on your traffic. 5 errors in 5 minutes might be fine if you have 10,000 requests/minute (that's a 0.01% error rate). Set it as an absolute count for low-traffic services, as a rate metric for high-traffic ones.
-
-`datapointsToAlarm: 2` with `evaluationPeriods: 2` means the alarm only fires if the threshold is breached in two consecutive evaluation periods. One bad data point doesn't page you.
-
-### SQS DLQ Depth
-
-Any message in a DLQ is a symptom. You want to know about it.
-
-```typescript
-const emailDlq = emailQueue.nodes.deadLetterQueue;
-
-const dlqAlarm = emailDlq
-  ? new cloudwatch.Alarm(stack, "EmailDlqAlarm", {
-      alarmName: `${$app.stage}-EmailDlqHasMessages`,
-      metric: emailDlq.metricApproximateNumberOfMessagesVisible({
-        period: cdk.Duration.minutes(5),
-        statistic: "Sum",
-      }),
-      threshold: 1,
-      evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    })
-  : undefined;
-```
-
-Zero tolerance on DLQs. One message in the DLQ should alert.
-
-### Lambda Duration Approaching Timeout
-
-A Lambda function approaching its timeout is a ticking clock. Set a duration alarm at 80% of the configured timeout:
-
-```typescript
-const invoiceChaserFn = invoiceChaserJob.nodes.function;
-
-const timeoutWarning = new cloudwatch.Alarm(stack, "InvoiceChaserDurationWarning", {
-  alarmName: `${$app.stage}-InvoiceChaserSlowdown`,
-  metric: invoiceChaserFn.metricDuration({
-    period: cdk.Duration.minutes(15),
-    statistic: "p99",
-  }),
-  threshold: 240_000, // 240 seconds = 80% of 300s timeout
-  evaluationPeriods: 1,
-  comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-  treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-});
-```
-
-### Routing Alerts to Slack
-
-Create an SNS topic, subscribe Slack (via a Lambda that forwards to the Slack Incoming Webhook), and point your alarms at the topic:
-
-```typescript
-// sst.config.ts
-import * as sns from "aws-cdk-lib/aws-sns";
-import * as snsSubscriptions from "aws-cdk-lib/aws-sns-subscriptions";
-import * as cloudwatchActions from "aws-cdk-lib/aws-cloudwatch-actions";
-// stack is already defined via Stack.of(invoiceHandler.nodes.function) above
-
-const alertTopic = new sns.Topic(stack, "AlertTopic");
-
-const slackAlerter = new sst.aws.Function("SlackAlerter", {
-  handler: "src/workers/slack-alert.handler",
-  environment: {
-    SLACK_WEBHOOK_URL: process.env.SLACK_WEBHOOK_URL ?? "",
+const invoiceChaser = new sst.aws.Function("InvoiceChaser", {
+  handler:  "src/jobs/invoice-chaser.handler",
+  timeout:  "5 minutes",
+  tracing:  "active",
+  layers: [
+    // Lambda Insights extension — check the AWS docs for the latest ARN in your region
+    "arn:aws:lambda:eu-west-1:580247275435:layer:LambdaInsightsExtension:38",
+  ],
+  // Lambda Insights requires CloudWatch permissions
+  transform: {
+    function: (args) => {
+      args.policies = [
+        ...(args.policies ?? []),
+        "arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy",
+      ];
+    },
   },
 });
-
-alertTopic.addSubscription(
-  new snsSubscriptions.LambdaSubscription(slackAlerter.nodes.function)
-);
-
-errorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
-if (dlqAlarm) dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
 ```
 
-```typescript
-// src/workers/slack-alert.ts
-import type { SNSHandler } from "aws-lambda";
+Once enabled, Lambda Insights adds a `/aws/lambda-insights` log group. These logs feed a pre-built dashboard in CloudWatch (Lambda → Functions → select function → Monitoring → Lambda Insights).
 
-export const handler: SNSHandler = async (event) => {
-  for (const record of event.Records) {
-    const alarm = JSON.parse(record.Sns.Message);
-    const emoji = alarm.NewStateValue === "ALARM" ? "🚨" : "✅";
+The metrics worth watching:
 
-    await fetch(process.env.SLACK_WEBHOOK_URL!, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: `${emoji} *${alarm.AlarmName}*\n${alarm.NewStateReason}`,
-      }),
-    });
-  }
-};
-```
+**`init_duration`** is cold start time. If this is consistently above 500ms, your Lambda bundle is too large, or you're importing modules you don't need on the hot path. Check for accidental `import *` patterns.
 
-Keep the Slack alert short. Name, state, reason. Don't dump a CloudWatch wall of text into the channel — include a deep link to the alarm instead.
+**`memory_utilisation`** as a percentage of configured memory. If consistently below 30%, you've over-provisioned. If regularly above 90%, increase the memory allocation (which also increases CPU, since Lambda allocates CPU proportionally to memory).
 
-### What Not to Alert On
+**`rx_bytes` and `tx_bytes`** are network I/O. An unexpectedly high `tx_bytes` on an invoice handler could indicate you're returning unnecessarily large payloads.
 
-- Lambda cold starts (expected, usually sub-second, not actionable)
-- Individual 4xx errors (clients send bad requests, this is normal)
-- Lambda throttles under 10/minute (burstable, recovers quickly)
-- DynamoDB consumed capacity approaching provisioned (irrelevant with on-demand billing)
-- Anything you'd snooze
-
-Every alert you add that you'd snooze teaches you to ignore all alerts. Start with five alerts max. Add more when a production incident reveals a gap.
+Lambda Insights adds approximately $0.20/million invocations to your bill — negligible for production workloads, worth monitoring in staging.
 
 ---
 
-## 10.6 The Minimum Viable Observability Setup
+## 10.8 Debugging a Production Incident
 
-If you're starting from scratch, here's what to ship on day one:
+All of the observability tooling in this chapter is only useful if you know how to use it under pressure. Here's the playbook for the most common Runway incident: an elevated error rate.
 
-**1. Structured JSON logging.** The `Logger` class from section 10.2. Add `requestId` from Lambda context to every log. Takes an hour.
+### Scenario: API errors spiking for one workspace
 
-**2. Lambda X-Ray tracing.** One line in `sst.config.ts`. Gives you trace maps and latency breakdown with no code changes.
+**Step 1 — Confirm the scope from the alarm.**
 
-**3. Four CloudWatch alarms:**
-   - API Lambda error rate (> 5 in 5 minutes)
-   - Email DLQ depth (≥ 1)
-   - Invoice chaser cron failures (any error)
-   - Lambda duration p99 approaching timeout (for any function with a job > 60s)
+The CloudWatch alarm fires: `production-RunwayApiErrors` in ALARM state. Open the alarm in the console. Check the time range and the metric graph. Is it one function or multiple? Is it sustained or a brief spike?
 
-**4. Two CloudWatch Logs Insights saved queries:**
-   - "Recent errors" — filter level = ERROR, last hour
-   - "Cron job history" — filter message = "complete", last 7 days
+**Step 2 — Find the errors in Logs Insights.**
 
-**5. A single dashboard with two rows:** business metrics (invoices, emails) and infrastructure metrics (error rate, p99 latency).
+Open CloudWatch Logs Insights. Select the log group for the relevant function. Run the saved "Recent errors" query, then add a filter:
 
-That's it. Two hours of work. It's the difference between "the invoice chaser silently stopped running three days ago and nobody noticed" and "the invoice chaser alarm fired at 9:01am this morning."
+```sql
+fields @timestamp, level, message, workspaceId, requestId, error
+| filter level = "ERROR"
+| stats count() as errorCount by workspaceId
+| sort errorCount desc
+| limit 20
+```
 
-Add traces with annotations, custom business metrics, anomaly detection, and per-workspace alerting as the product and team grow. The foundation carries everything else.
+If the errors are concentrated in one workspace, that's a data problem. If they're spread across workspaces, it's a code or infrastructure problem.
+
+**Step 3 — Get a full log trace for a failing request.**
+
+Take one of the `requestId` values from the query results. Run:
+
+```sql
+fields @timestamp, level, message, workspaceId
+| filter requestId = "abc123-..."
+| sort @timestamp asc
+```
+
+This shows every log line emitted during that specific request in chronological order. You'll usually see where the failure occurs.
+
+**Step 4 — Find the X-Ray trace.**
+
+Copy the `requestId` to X-Ray → Search traces → Filter by annotation or trace ID. The trace shows exactly which downstream call failed (DynamoDB? SQS? Aurora?) and how long each step took.
+
+**Step 5 — Reproduce locally if needed.**
+
+If the trace shows a DynamoDB `ConditionalCheckFailedException`, or a Prisma query timing out, or a Zod parse failure — you now have enough context to reproduce it in `sst dev`. The combination of structured logs and X-Ray traces should give you the workspace ID, the request payload shape, and the exact line the error originated.
+
+**Step 6 — Fix and deploy.**
+
+With the cause identified: fix, push to main, watch the error rate drop in the dashboard. Confirm in Logs Insights that the errors have stopped. Close the alarm manually once you're satisfied (`Set alarm state → OK`).
+
+The full investigation — alarm fires to root cause identified — should take under 10 minutes for anything with good observability in place. Without it, the same investigation takes hours of guesswork.
+
+---
+
+## 10.9 The Minimum Viable Observability Setup
+
+If you're starting from scratch, here's what to ship on day one. Each item is an hour or less.
+
+**Structured JSON logging.** The `Logger` class from section 10.2. Add `requestId` from Lambda context to every handler. This alone cuts incident investigation time by 80%.
+
+**Log retention.** Set 30-day retention on all production log groups. Without this, the bill grows indefinitely. Fifteen minutes to add the `withRetention` calls in `sst.config.ts`.
+
+**X-Ray tracing.** One line in `sst.config.ts`: `app.transform({ function: (args) => { args.tracing = "active"; } })`. Immediate distributed trace visibility, no code changes required.
+
+**Four CloudWatch alarms:**
+- API Lambda error rate (≥ 5 in 5 minutes, two consecutive periods)
+- Email DLQ depth (≥ 1 message)
+- Invoice chaser any error
+- Any Lambda duration p99 approaching 80% of timeout
+
+**Slack routing for alarms.** The `SlackAlerter` Lambda from section 10.5. Alarms that fire into email get missed. Alarms that fire into the team Slack channel get fixed.
+
+**Two saved Logs Insights queries:**
+- "Recent errors" — `filter level = "ERROR"`, last hour, sorted by timestamp
+- "Cron job history" — `filter message = "complete"`, last 7 days
+
+**A single dashboard.** Row 1: business metrics (invoices paid, email send rate). Row 2: infrastructure metrics (error rate, p99 latency). Ten widgets total. This is enough to see whether the system is healthy at a glance.
+
+That's eight items. Two to four hours of work. It's the difference between "the invoice chaser silently stopped running three days ago" and "the invoice chaser alarm fired at 9:01am and was resolved by 9:18am."
+
+Add Lambda Insights, custom sampling rules, per-workspace dashboards, and anomaly detection as the product grows. The foundation carries everything else.
 
 ---
 
@@ -574,29 +805,31 @@ Runway is complete. The full architecture, from first request to last observable
 
 ```
 [GitHub Actions CI/CD]
-  └─ Type check → Migrate → Deploy (preview per PR, staging on merge, production on approval)
+  └─ Type check → Migrate → Deploy
+     (preview per PR, staging on merge, production on manual approval)
 
 [Cognito User Pool]
-  └─ JWT tokens → verified at API Gateway
+  └─ JWT tokens, verified at API Gateway
 
 [API Gateway V2]
-  └─ Routes → Lambda handlers (thin, typed, structured logging)
+  └─ Routes → Lambda handlers (thin, typed, structured logging, X-Ray traced)
 
 [Lambda handlers]
-  ├─ [DynamoDB] — single-table, typed repositories (Ch 4)
-  ├─ [Aurora Serverless v2 + Prisma] — relational data, migrations (Ch 5)
-  ├─ [S3] — file uploads via presigned URLs (Ch 6)
-  ├─ [SQS] — reliable async work (Ch 8)
-  └─ [EventBridge] — domain event fan-out (Ch 8)
+  ├─ [DynamoDB] — single-table, typed repositories            (Ch. 4)
+  ├─ [Aurora Serverless v2 + Prisma] — relational reporting   (Ch. 5)
+  ├─ [S3] — file uploads via presigned URLs                   (Ch. 6)
+  ├─ [SQS] — reliable async work, DLQ monitoring              (Ch. 8)
+  └─ [EventBridge] — domain event fan-out                     (Ch. 8)
 
 [Background layer]
-  ├─ Cron (invoice chaser, weekly digest)
-  └─ Step Functions (year-end report generation)
+  ├─ Cron (invoice chaser, daily 9am)
+  └─ S3 event processor (thumbnails, page count)
 
 [Observability]
-  ├─ CloudWatch Logs — structured JSON, Logs Insights queries
-  ├─ X-Ray — distributed traces across all services
-  ├─ CloudWatch Metrics — business + infrastructure dashboards
+  ├─ CloudWatch Logs — structured JSON, saved Insights queries
+  ├─ X-Ray — distributed traces, workspace-level annotations
+  ├─ CloudWatch Metrics — Runway/Business namespace via EMF
+  ├─ CloudWatch Dashboards — business + infrastructure rows
   └─ CloudWatch Alarms → SNS → Slack
 ```
 
@@ -611,15 +844,15 @@ This is what shipping TypeScript on AWS looks like when it's done properly. Not 
 The appendices cover the things that didn't fit cleanly into the chapter flow:
 
 - **Appendix A** — AWS account setup done right (root account lockdown, billing alerts, MFA)
-- **Appendix B** — Common error reference (ConditionalCheckFailedException, connection pool exhaustion, IAM permission errors — causes and fixes)
+- **Appendix B** — Common error reference (`ConditionalCheckFailedException`, connection pool exhaustion, IAM permission errors — causes and fixes)
 - **Appendix C** — SST component cheat sheet
 - **Appendix D** — TypeScript patterns reference (`satisfies`, discriminated unions, branded types)
 - **Appendix E** — Cost estimation at 1k, 10k, and 100k users
 
-If you've read this far and built Runway alongside it: you now know more about running TypeScript on AWS than most teams who've been doing it for years. The gap isn't the knowledge — it's taking the time to get it right.
+If you've read this far and built Runway alongside it: you know more about running TypeScript on AWS than most teams who've been doing it for years. The gap isn't knowledge — it's taking the time to get it right.
 
 Ship it.
 
 ---
 
-> **The code for this chapter** is available at `10-monitoring-observability/` in the companion repository.
+> **The code for this chapter** is available on the `chapter-10` branch of the companion repository.
