@@ -1981,6 +1981,24 @@ Well-behaved API clients read these headers and back off before they get 429s. D
 
 ---
 
+## 3.9 A Note on Caching
+
+Caching deserves its own book. Seriously — HTTP caching, CDN invalidation, distributed cache consistency, and cache stampede prevention are all genuinely complex topics that interact badly when you get them wrong. Covering it properly here would mean a chapter as long as this one, and half the advice would depend on your specific traffic patterns.
+
+What you should know:
+
+**Caching is essential for scaling.** At some point, the database becomes the bottleneck and adding more Lambda concurrency doesn't help. Caching at the right layer eliminates the bottleneck entirely.
+
+**There are multiple layers and they're not equivalent:**
+
+- **Data layer** — cache DynamoDB reads in memory across warm Lambda invocations, or add DynamoDB Accelerator (DAX) for microsecond reads at scale. This is the easiest layer to add and the least likely to cause consistency bugs.
+- **Application layer** — cache computed results (aggregations, transformed data) in ElastiCache (Redis). Useful when the computation is expensive even if the underlying data is cached.
+- **HTTP/CDN layer** — CloudFront in front of API Gateway caches entire HTTP responses. Cheapest per-request cost, but invalidation is the hardest problem: when data changes, how do you evict the right cache entries?
+
+**You can absolutely skip caching to get off the ground.** Runway as built in this book has no caching layer, and it will handle a meaningful user load without one. Lambda scales horizontally, DynamoDB scales automatically, and Aurora Serverless scales on demand. Caching is an optimisation you add when you have evidence — real traffic, real latency measurements — that tells you where the bottleneck actually is.
+
+**When you do add it, add it at the data layer first.** It's the most contained change, has the fewest consistency concerns (DynamoDB is the source of truth regardless), and gives you the best return for the effort. CloudFront caching comes last, when you have stable data shapes, stable URLs, and the patience to think through cache key design and invalidation strategy.
+
 ---
 
 ## 3.10 API Versioning and Evolution
