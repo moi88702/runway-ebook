@@ -149,8 +149,8 @@ This directly serves access patterns 1–3 and 7–11:
 
 Access patterns 12 and 16 — list all invoices for a workspace, and list unpaid invoices — need a GSI because the primary key is `PROJECT#`, not `WORKSPACE#`. We'll use a GSI with:
 
-- `GSI1PK = WORKSPACE#<workspaceId>`
-- `GSI1SK = INVOICE#<invoiceId>`
+- `gsi1pk = WORKSPACE#<workspaceId>`
+- `gsi1sk = INVOICE#<invoiceId>`
 
 Every invoice item carries these attributes, giving us a workspace-scoped index of all invoices. For pattern 16 (unpaid invoices), we'll use a filter expression on `status` — acceptable here because filtering a workspace's invoices is never a full-table scan, just filtering within a bounded partition.
 
