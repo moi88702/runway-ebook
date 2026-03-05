@@ -301,32 +301,7 @@ The error shape matters. Your frontend clients will parse these responses, and t
 
 Every error has a `code` (machine-readable, stable across versions) and a `message` (human-readable, can change). Clients can switch on `code` reliably. The `details` field carries extra context — we'll use it in Chapter 3 for Zod validation errors.
 
-### HTTP status codes worth knowing
-
-People misuse status codes constantly. Here's the Runway policy:
-
-| Status | When to use |
-|--------|-------------|
-| 200 OK | Successful GET, successful PUT (with body) |
-| 201 Created | Successful POST that creates a resource |
-| 204 No Content | Successful DELETE, successful PUT/PATCH with no response body |
-| 400 Bad Request | Malformed request syntax, invalid JSON, missing required body |
-| 401 Unauthorized | Authentication required but missing or invalid token |
-| 403 Forbidden | Authenticated, but not allowed to access this resource |
-| 404 Not Found | Resource doesn't exist — or user isn't allowed to know it exists |
-| 409 Conflict | Resource already exists (idempotency conflict) |
-| 422 Unprocessable Entity | Request is valid syntax but semantically invalid (failed validation) |
-| 500 Internal Server Error | Something went wrong on our side that the client can't fix |
-
-The 401/403 distinction matters: 401 means "I don't know who you are", 403 means "I know who you are, and you can't do this." In practice, for resources that belong to other users, you often want 404 rather than 403 — returning 403 tells an attacker that the resource exists.
-
-One misuse that's rampant in the wild: using 200 with a success field in the body. Don't do this:
-
-```json
-{ "success": false, "error": "Something went wrong" }
-```
-
-HTTP has status codes. Use them. Clients know how to check them.
+The full Runway HTTP status code policy — what each code means and when to use it — is in Appendix B.
 
 ### Typed response wrappers
 
@@ -431,31 +406,6 @@ export { getClient };
 On the first invocation (warm or cold), `getClient()` initialises the client and caches it. On every subsequent invocation **in the same execution environment**, it returns the cached instance. The client is reused across invocations in the same environment, which means connection overhead is paid once per environment lifecycle, not once per request.
 
 Here's the full implementation for Runway's DynamoDB client:
-
-The file re-exports all the command types that services will need. This means nothing outside `lib/db/` ever imports directly from the AWS SDK — keeping the SDK version a detail only this file needs to know about.
-
-```typescript
-// src/lib/db/dynamodb.ts
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import {
-  DynamoDBDocumentClient,
-  GetCommand,
-  PutCommand,
-  UpdateCommand,
-  DeleteCommand,
-  QueryCommand,
-  TransactWriteCommand,
-} from "@aws-sdk/lib-dynamodb";
-
-export {
-  GetCommand,
-  PutCommand,
-  UpdateCommand,
-  DeleteCommand,
-  QueryCommand,
-  TransactWriteCommand,
-};
-```
 
 The client uses the Document Client wrapper, which handles DynamoDB's type marshalling automatically. Three options are set deliberately: `maxAttempts: 3` caps SDK retries to keep cold start time predictable rather than letting the SDK spin through its default backoff. `removeUndefinedValues: true` prevents undefined fields from being written as `NULL` — you want the attribute absent, not null. `wrapNumbers: false` returns numbers as native JS numbers rather than wrapped `NumberValue` objects.
 
@@ -2050,9 +2000,9 @@ Integration tests against real AWS surface a class of bugs that unit tests can't
 
 ---
 
-## Putting It All Together
+## Where We Are
 
-Let's assemble a complete, production-ready handler using every pattern from this chapter:
+Here's a complete, production-ready handler using every pattern from this chapter:
 
 ```typescript
 // src/functions/invoices/create.ts — the complete version
@@ -2128,145 +2078,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
-And the SST configuration that deploys it:
+Every handler in Runway follows the same pattern. Same error handling shape. Same logging structure. Same response format. When something breaks, you open CloudWatch, filter by `requestId`, and see the complete story of that request from start to finish.
 
-```typescript
-// sst.config.ts — final version for Chapter 2
-/// <reference path="./.sst/platform/config.d.ts" />
+When a client's API breaks, you know immediately if it's a 4xx (they're doing something wrong) or a 5xx (we're doing something wrong). The `AppError` class means the error is never ambiguous — it has a code, a status, and a message, set in one place.
 
-export default $config({
-  app(input) {
-    return {
-      name: "runway",
-      removal: input?.stage === "production" ? "retain" : "remove",
-      home: "aws",
-    };
-  },
-  async run() {
-    const isProd = $app.stage === "production";
-
-    const api = new sst.aws.ApiGatewayV2("RunwayApi", {
-      accessLog: isProd ? { retention: "1 month" } : false,
-    });
-
-    const table = new sst.aws.Dynamo("RunwayTable", {
-      fields: { pk: "string", sk: "string" },
-      primaryIndex: { hashKey: "pk", rangeKey: "sk" },
-    });
-
-    const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
-    const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
-
-    const stripeSecretKey = new sst.Secret("StripeSecretKey");
-    const stripeWebhookSecret = new sst.Secret("StripeWebhookSecret");
-
-    const sharedFunctionConfig = {
-      link: [table, deliverablesBucket, invoicesBucket, stripeSecretKey, stripeWebhookSecret],
-      environment: {
-        SST_STAGE: $app.stage,
-        APP_URL: isProd
-          ? "https://app.runway.so"
-          : `https://${$app.stage}.runway.so`,
-        SES_FROM_ADDRESS: "invoices@runway.so",
-        LOG_LEVEL: isProd ? "info" : "debug",
-      },
-      memory: "512 MB",
-      timeout: "30 seconds",
-    } as const;
-
-    api.route("GET /health", {
-      handler: "src/functions/health.handler",
-    });
-
-    // Workspaces
-    api.route("POST /workspaces", {
-      handler: "src/functions/workspaces/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("GET /workspaces/{workspaceId}", {
-      handler: "src/functions/workspaces/get.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("PATCH /workspaces/{workspaceId}", {
-      handler: "src/functions/workspaces/update.handler",
-      ...sharedFunctionConfig,
-    });
-
-    // Clients
-    api.route("GET /workspaces/{workspaceId}/clients", {
-      handler: "src/functions/clients/list.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /workspaces/{workspaceId}/clients", {
-      handler: "src/functions/clients/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("GET /workspaces/{workspaceId}/clients/{clientId}", {
-      handler: "src/functions/clients/get.handler",
-      ...sharedFunctionConfig,
-    });
-
-    // Projects
-    api.route("GET /workspaces/{workspaceId}/projects", {
-      handler: "src/functions/projects/list.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /workspaces/{workspaceId}/projects", {
-      handler: "src/functions/projects/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    // Invoices
-    api.route("GET /workspaces/{workspaceId}/invoices", {
-      handler: "src/functions/invoices/list.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /workspaces/{workspaceId}/invoices", {
-      handler: "src/functions/invoices/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("GET /workspaces/{workspaceId}/invoices/{invoiceId}", {
-      handler: "src/functions/invoices/get.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("PATCH /workspaces/{workspaceId}/invoices/{invoiceId}", {
-      handler: "src/functions/invoices/update.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /workspaces/{workspaceId}/invoices/{invoiceId}/send", {
-      handler: "src/functions/invoices/send.handler",
-      ...sharedFunctionConfig,
-    });
-
-    return {
-      api: api.url,
-    };
-  },
-});
-```
-
----
-
-## The Layer We've Built
-
-Take a step back and look at what we have now.
-
-Every handler in Runway follows the same pattern. Same error handling shape. Same logging structure. Same response format. When something breaks, you open CloudWatch, filter by `requestId`, and you see the complete story of that request from start to finish — the method, the path, the function name, every service call, the final outcome.
-
-When a client's API breaks, you know immediately if it's a 4xx (they're doing something wrong) or a 5xx (we're doing something wrong). You know exactly which error code and status code they received. The `AppError` class means the error is never ambiguous — it has a code, a status, and a message, and they're all set in the same place.
-
-The service layer has no Lambda contamination. You can run the service functions in a test, a cron job, a CLI script, or a different Lambda handler without changing a line. The handler is the adapter that translates between Lambda and your business logic.
-
-Here's the state of the system:
+The service layer has no Lambda contamination. You can run service functions in a test, a cron job, or a CLI script without changing a line. The handler is the adapter; the service is the logic.
 
 ```
 Chapter 1:  [API Gateway] ─────────────────────→ [Lambda: GET /health]
@@ -2277,8 +2093,8 @@ Chapter 2:  [API Gateway] → [Handlers (typed)] → [Services (pure)]
                             [Try/catch pattern]     [DB clients (lazy)]
 ```
 
-The patterns are in place. Chapter 3 adds the final layer of the handler tier: request validation with Zod. Right now, handlers trust whatever arrives in `event.body`. That's about to change — you'll define a schema, validate the input, and get automatic 422 responses with field-level error details, without touching your service code.
+Chapter 3 adds the final handler layer: request validation with Zod. Right now handlers trust whatever arrives in `event.body`. That's about to change.
 
 ---
 
-> **The code for this chapter** is available at `02-lambda-functions/` in the companion repository. The complete file structure matches what we've built here. Run `npm install && npx sst dev` to start the local environment, then try the integration tests with `vitest --run src/test/integration`.
+> **The code for this chapter** is on the `chapter-2` branch of the companion repository.

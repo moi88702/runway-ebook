@@ -1981,102 +1981,6 @@ Well-behaved API clients read these headers and back off before they get 429s. D
 
 ---
 
-## 3.9 Response Caching
-
-For some Runway endpoints, the same data is requested frequently and doesn't change often. Caching those responses reduces Lambda invocations, DynamoDB reads, and latency.
-
-### Where to cache
-
-HTTP API does not have built-in response caching (that's a REST API feature). For HTTP API, caching happens at CloudFront — in front of API Gateway.
-
-The right architecture:
-```
-Client → CloudFront → API Gateway → Lambda → DynamoDB
-              ↑
-          Cache lives here
-```
-
-When CloudFront has a cached response, Lambda is never invoked.
-
-### What to cache in Runway
-
-Not everything should be cached. The decision:
-
-**Good candidates:**
-- `GET /workspaces/{workspaceId}` — workspace settings change rarely
-- `GET /workspaces/{workspaceId}/clients/{clientId}` — client details change rarely
-- `GET /workspaces/{workspaceId}/projects/{projectId}` — project details change rarely
-
-**Bad candidates:**
-- `GET /workspaces/{workspaceId}/invoices` — list endpoints with filters don't cache well
-- Any authenticated endpoint where the cache must be user-scoped (CloudFront cache key must include the auth token — complex)
-- Anything that can be updated frequently
-
-### Adding CloudFront in front of API Gateway
-
-The `defaultCacheBehavior` uses `CachingDisabled` for all routes (pass-through), with `orderedCacheBehaviors` overriding specific path patterns where caching is safe.
-
-```typescript
-// sst.config.ts
-const cdn = new sst.aws.CloudFront("RunwayApiCdn", {
-  origins: [
-    {
-      domain: api.url.apply(url => new URL(url).hostname),
-      path: "/",
-    },
-  ],
-  defaultCacheBehavior: {
-    viewerProtocolPolicy: "redirect-to-https",
-    cachePolicy: "CachingDisabled",
-    originRequestPolicy: "AllViewerExceptHostHeader",
-    allowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
-    cachedMethods: ["GET", "HEAD"],
-  },
-  orderedCacheBehaviors: [
-    {
-      pathPattern: "/workspaces/*/",
-      viewerProtocolPolicy: "redirect-to-https",
-      compress: true,
-      cachePolicyId: "...",
-      allowedMethods: ["GET", "HEAD"],
-      cachedMethods: ["GET", "HEAD"],
-    },
-  ],
-});
-```
-
-Full CloudFront setup is beyond the scope of this chapter — Chapter 6 covers CloudFront for S3 assets in detail. The key principle: for HTTP API, caching is a CloudFront concern, not an API Gateway concern.
-
-### Cache-Control headers from Lambda
-
-The simpler approach: set `Cache-Control` headers in Lambda responses and let CloudFront honour them. This works with any CloudFront configuration that's set up to respect origin cache headers.
-
-```typescript
-// src/functions/workspaces/get.ts
-export const handler = validateHandler(
-  {},
-  async (event) => {
-    const workspaceId = event.pathParameters?.workspaceId;
-    if (!workspaceId) return res.badRequest("workspaceId is required");
-
-    const workspace = await workspaceService.findById(workspaceId);
-    if (!workspace) return res.notFound("Workspace");
-
-    return {
-      ...res.ok(workspace),
-      headers: {
-        ...res.ok(workspace).headers,
-        "Cache-Control": "public, max-age=300, stale-while-revalidate=60",
-      },
-    };
-  }
-);
-```
-
-For now, the better approach is to not fight for caching at the HTTP layer. For read-heavy workloads, add DynamoDB Accelerator (DAX) or an in-memory cache in the service layer. The HTTP cache is the hardest to invalidate correctly — Lambda can't tell CloudFront to evict a specific response when a workspace is updated without a CloudFront invalidation call (which has its own latency and complexity).
-
-Cache at the data layer in Chapter 4. Let HTTP caching come later when you have evidence you need it.
-
 ---
 
 ## 3.10 API Versioning and Evolution
@@ -2196,12 +2100,18 @@ For Runway:
 
 ---
 
-## 3.11 The Complete SST Configuration
+## 3.11 Structuring the SST Configuration
 
-Let's pull everything together into the final `sst.config.ts` for Chapter 3:
+As the project grows, a flat `sst.config.ts` that creates every resource and registers every route in one function becomes hard to navigate. By Chapter 8, there will be SQS queues, EventBridge buses, S3 buckets, Cognito pools, cron jobs, and 20+ routes all in the same file.
+
+The solution is to extract infrastructure setup into helper functions — one per concern, each returning what the caller needs. The `sst.config.ts` becomes a thin orchestrator:
 
 ```typescript
-/// <reference path="./.sst/platform/config.d.ts" />
+// sst.config.ts
+import { setupRunwayTable }   from "./infra/table";
+import { setupRunwayApi }     from "./infra/api";
+import { setupApiRoutes }     from "./infra/routes";
+import { setupRunwaySecrets } from "./infra/secrets";
 
 export default $config({
   app(input) {
@@ -2213,172 +2123,119 @@ export default $config({
   },
 
   async run() {
-    const isProd = $app.stage === "production";
+    const isProd  = $app.stage === "production";
+    const secrets = setupRunwaySecrets();
+    const table   = setupRunwayTable();
+    const api     = setupRunwayApi(isProd);
 
-    // ─── Secrets ───────────────────────────────────────────────────────────
-    const stripeSecretKey = new sst.Secret("StripeSecretKey");
-    const stripeWebhookSecret = new sst.Secret("StripeWebhookSecret");
-
-    // ─── Storage (placeholder until Chapter 4 adds DynamoDB properly) ──────
-    const table = new sst.aws.Dynamo("RunwayTable", {
-      fields: { pk: "string", sk: "string" },
-      primaryIndex: { hashKey: "pk", rangeKey: "sk" },
-      globalIndexes: {
-        gsi1: { hashKey: "gsi1pk", rangeKey: "gsi1sk" },
-      },
-      ttl: "ttl",
-    });
-
-    const deliverablesBucket = new sst.aws.Bucket("RunwayDeliverables");
-    const invoicesBucket = new sst.aws.Bucket("RunwayInvoices");
-
-    // ─── API Gateway ───────────────────────────────────────────────────────
-    const allowedOrigins = isProd
-      ? ["https://app.runway.so"]
-      : [
-          "http://localhost:3000",
-          "http://localhost:5173",
-          `https://${$app.stage}.runway.so`,
-        ];
-
-    const api = new sst.aws.ApiGatewayV2("RunwayApi", {
-      cors: {
-        allowOrigins: allowedOrigins,
-        allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allowHeaders: [
-          "Content-Type",
-          "Authorization",
-          "X-User-Id",
-          "X-Request-Id",
-        ],
-        exposeHeaders: ["X-Request-Id"],
-        allowCredentials: true,
-        maxAge: isProd ? "1 day" : "1 minute",
-      },
-      accessLog: isProd
-        ? { retention: "1 month" }
-        : { retention: "1 week" },
-      transform: {
-        stage: {
-          defaultRouteSettings: {
-            throttlingBurstLimit: isProd ? 500 : 50,
-            throttlingRateLimit: isProd ? 200 : 20,
-          },
-        },
-      },
-    });
-
-    // ─── Shared function config ─────────────────────────────────────────────
     const sharedFunctionConfig = {
-      link: [table, deliverablesBucket, invoicesBucket, stripeSecretKey, stripeWebhookSecret],
+      link: [table, secrets.stripeKey, secrets.stripeWebhook],
       environment: {
-        SST_STAGE: $app.stage,
-        APP_URL: isProd
-          ? "https://app.runway.so"
-          : `https://${$app.stage}.runway.so`,
+        SST_STAGE:       $app.stage,
+        APP_URL:         isProd ? "https://app.runway.so" : `https://${$app.stage}.runway.so`,
         SES_FROM_ADDRESS: "invoices@runway.so",
-        LOG_LEVEL: isProd ? "info" : "debug",
+        LOG_LEVEL:       isProd ? "info" : "debug",
       },
-      memory: "512 MB" as const,
+      memory:  "512 MB" as const,
       timeout: "30 seconds" as const,
     };
 
-    // ─── Health check ──────────────────────────────────────────────────────
-    api.route("GET /health", {
-      handler: "src/functions/health.handler",
-    });
+    setupApiRoutes(api, sharedFunctionConfig);
 
-    // ─── Workspaces ────────────────────────────────────────────────────────
-    api.route("POST /v1/workspaces", {
-      handler: "src/functions/workspaces/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("GET /v1/workspaces/{workspaceId}", {
-      handler: "src/functions/workspaces/get.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("PATCH /v1/workspaces/{workspaceId}", {
-      handler: "src/functions/workspaces/update.handler",
-      ...sharedFunctionConfig,
-    });
-
-    // ─── Clients ───────────────────────────────────────────────────────────
-    api.route("GET /v1/workspaces/{workspaceId}/clients", {
-      handler: "src/functions/clients/list.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /v1/workspaces/{workspaceId}/clients", {
-      handler: "src/functions/clients/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("GET /v1/workspaces/{workspaceId}/clients/{clientId}", {
-      handler: "src/functions/clients/get.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("PATCH /v1/workspaces/{workspaceId}/clients/{clientId}", {
-      handler: "src/functions/clients/update.handler",
-      ...sharedFunctionConfig,
-    });
-
-    // ─── Projects ──────────────────────────────────────────────────────────
-    api.route("GET /v1/workspaces/{workspaceId}/projects", {
-      handler: "src/functions/projects/list.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /v1/workspaces/{workspaceId}/projects", {
-      handler: "src/functions/projects/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("GET /v1/workspaces/{workspaceId}/projects/{projectId}", {
-      handler: "src/functions/projects/get.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("PATCH /v1/workspaces/{workspaceId}/projects/{projectId}", {
-      handler: "src/functions/projects/update.handler",
-      ...sharedFunctionConfig,
-    });
-
-    // ─── Invoices ──────────────────────────────────────────────────────────
-    api.route("GET /v1/workspaces/{workspaceId}/invoices", {
-      handler: "src/functions/invoices/list.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /v1/workspaces/{workspaceId}/invoices", {
-      handler: "src/functions/invoices/create.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("GET /v1/workspaces/{workspaceId}/invoices/{invoiceId}", {
-      handler: "src/functions/invoices/get.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("PATCH /v1/workspaces/{workspaceId}/invoices/{invoiceId}", {
-      handler: "src/functions/invoices/update.handler",
-      ...sharedFunctionConfig,
-    });
-
-    api.route("POST /v1/workspaces/{workspaceId}/invoices/{invoiceId}/send", {
-      handler: "src/functions/invoices/send.handler",
-      ...sharedFunctionConfig,
-    });
-
-    // ─── Outputs ───────────────────────────────────────────────────────────
-    return {
-      api: api.url,
-    };
+    return { api: api.url };
   },
 });
 ```
+
+Each helper function lives in `infra/` and is responsible for one slice of the infrastructure:
+
+```typescript
+// infra/table.ts
+export function setupRunwayTable() {
+  return new sst.aws.Dynamo("RunwayTable", {
+    fields: {
+      pk: "string", sk: "string",
+      gsi1pk: "string", gsi1sk: "string",
+      gsi2pk: "string",
+    },
+    primaryIndex: { hashKey: "pk", rangeKey: "sk" },
+    globalIndexes: {
+      gsi1: { hashKey: "gsi1pk", rangeKey: "gsi1sk" },
+      gsi2: { hashKey: "gsi2pk", rangeKey: "sk" },
+    },
+    ttl: "ttl",
+  });
+}
+```
+
+```typescript
+// infra/api.ts
+export function setupRunwayApi(isProd: boolean) {
+  const allowedOrigins = isProd
+    ? ["https://app.runway.so"]
+    : ["http://localhost:3000", "http://localhost:5173", `https://${$app.stage}.runway.so`];
+
+  return new sst.aws.ApiGatewayV2("RunwayApi", {
+    cors: {
+      allowOrigins:     allowedOrigins,
+      allowMethods:     ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      allowHeaders:     ["Content-Type", "Authorization", "X-User-Id", "X-Request-Id"],
+      exposeHeaders:    ["X-Request-Id"],
+      allowCredentials: true,
+      maxAge:           isProd ? "1 day" : "1 minute",
+    },
+    accessLog: isProd ? { retention: "1 month" } : { retention: "1 week" },
+    transform: {
+      stage: {
+        defaultRouteSettings: {
+          throttlingBurstLimit: isProd ? 500 : 50,
+          throttlingRateLimit:  isProd ? 200 : 20,
+        },
+      },
+    },
+  });
+}
+```
+
+```typescript
+// infra/routes.ts
+type Api    = ReturnType<typeof setupRunwayApi>;
+type Config = ReturnType<typeof buildSharedConfig>;
+
+export function setupApiRoutes(api: Api, config: Config) {
+  const v1Routes = [
+    ["POST",  "/v1/workspaces",                                        "workspaces/create"],
+    ["GET",   "/v1/workspaces/{workspaceId}",                          "workspaces/get"],
+    ["PATCH", "/v1/workspaces/{workspaceId}",                          "workspaces/update"],
+    ["GET",   "/v1/workspaces/{workspaceId}/clients",                  "clients/list"],
+    ["POST",  "/v1/workspaces/{workspaceId}/clients",                  "clients/create"],
+    ["GET",   "/v1/workspaces/{workspaceId}/clients/{clientId}",       "clients/get"],
+    ["PATCH", "/v1/workspaces/{workspaceId}/clients/{clientId}",       "clients/update"],
+    ["GET",   "/v1/workspaces/{workspaceId}/projects",                 "projects/list"],
+    ["POST",  "/v1/workspaces/{workspaceId}/projects",                 "projects/create"],
+    ["GET",   "/v1/workspaces/{workspaceId}/projects/{projectId}",     "projects/get"],
+    ["PATCH", "/v1/workspaces/{workspaceId}/projects/{projectId}",     "projects/update"],
+    ["GET",   "/v1/workspaces/{workspaceId}/invoices",                 "invoices/list"],
+    ["POST",  "/v1/workspaces/{workspaceId}/invoices",                 "invoices/create"],
+    ["GET",   "/v1/workspaces/{workspaceId}/invoices/{invoiceId}",     "invoices/get"],
+    ["PATCH", "/v1/workspaces/{workspaceId}/invoices/{invoiceId}",     "invoices/update"],
+    ["POST",  "/v1/workspaces/{workspaceId}/invoices/{invoiceId}/send","invoices/send"],
+  ] as const;
+
+  api.route("GET /health", { handler: "src/functions/health.handler" });
+
+  for (const [method, path, handlerPath] of v1Routes) {
+    api.route(`${method} ${path}`, {
+      handler: `src/functions/${handlerPath}.handler`,
+      ...config,
+    });
+  }
+}
+```
+
+The pattern pays off as Runway grows. Adding a new route is one line in the `v1Routes` array. Adding a queue or a cron is a new helper import and one call in `sst.config.ts`. The main config file stays readable regardless of how many resources accumulate across chapters.
+
+> The complete `infra/` module — including `secrets.ts` and the full `routes.ts` array as it grows through the book — is in the `chapter-3` branch of the companion repository.
 
 ---
 

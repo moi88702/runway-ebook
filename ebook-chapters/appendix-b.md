@@ -4,6 +4,27 @@ The errors you'll hit in production, what they actually mean, and how to fix the
 
 ---
 
+## HTTP Status Code Policy
+
+Runway's status code conventions. The 401/403 distinction in particular catches people out: 401 means "I don't know who you are," 403 means "I know who you are and you can't do this." For resources that belong to other users, prefer 404 over 403 — returning 403 tells an attacker the resource exists.
+
+| Status | When to use |
+|--------|-------------|
+| 200 OK | Successful GET, successful PUT (with body) |
+| 201 Created | Successful POST that creates a resource |
+| 204 No Content | Successful DELETE, successful PUT/PATCH with no response body |
+| 400 Bad Request | Malformed syntax, invalid JSON, missing required fields |
+| 401 Unauthorized | Authentication required but missing or invalid |
+| 403 Forbidden | Authenticated, but not allowed to access this resource |
+| 404 Not Found | Resource doesn't exist — or user isn't allowed to know it exists |
+| 409 Conflict | Resource already exists (idempotency conflict) |
+| 422 Unprocessable Entity | Valid syntax but semantically invalid (failed Zod validation) |
+| 500 Internal Server Error | Something on our side the client can't fix |
+
+Never use 200 with a `success: false` body. HTTP has status codes. Use them.
+
+---
+
 ## DynamoDB Errors
 
 ### `ConditionalCheckFailedException`

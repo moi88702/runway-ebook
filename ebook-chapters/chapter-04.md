@@ -48,28 +48,20 @@ Before writing a line of code, we need to answer: what does Runway need to do wi
 
 ### Access patterns
 
-Here are every read and write operation Runway's API needs to perform:
+Runway has four entities — **Workspace**, **Client**, **Project**, and **Invoice** — each with the full set of standard CRUD endpoints (create, get, list, update). Those are all straightforward primary-key operations and don't drive the key design. The patterns that do are the ones that require querying across entity boundaries:
 
-| # | Operation | Used by |
-|---|-----------|---------|
-| 1 | Get workspace by ID | All authenticated requests |
-| 2 | Create workspace | Sign-up flow |
-| 3 | List all clients in a workspace | Client list page |
-| 4 | Get client by ID | Client detail page |
-| 5 | Create client | Add client form |
-| 6 | Update client | Edit client form |
-| 7 | List all projects for a client | Project list |
-| 8 | Get project by ID | Project detail page |
-| 9 | Create project | New project form |
-| 10 | Update project status | Project status toggle |
-| 11 | List all invoices for a project | Invoice list on project page |
-| 12 | List all invoices for a workspace | Invoices overview page |
-| 13 | Get invoice by ID | Invoice detail page |
-| 14 | Create invoice | New invoice form |
-| 15 | Update invoice status | Mark as paid / sent |
-| 16 | List unpaid/overdue invoices | Automated reminder jobs (Chapter 8) |
+| # | Operation | Why it drives key design |
+|---|-----------|--------------------------|
+| 1 | List all clients in a workspace | Needs workspace-scoped query without scanning |
+| 2 | List all projects in a workspace | Same — workspace is the natural list boundary |
+| 3 | List all invoices for a project | Project is the parent; need a range query |
+| 4 | List all invoices for a workspace | Cross-project; can't serve from primary key alone — drives GSI1 |
+| 5 | Get invoice by ID (no project ID known) | Drives GSI2 in Chapter 7 |
+| 6 | List unpaid/overdue invoices | Cross-workspace; Chapter 8 cron — drives sparse index or scan decision |
+| 7 | Create project (atomic with workspace check) | Drives TransactWriteCommand in §4.7 |
+| 8 | Update invoice status with version guard | Drives optimistic locking in §4.8 |
 
-Sixteen access patterns. In a relational database, most of these are simple `SELECT` queries with foreign key joins. In DynamoDB, each one must be served by either a primary key lookup or a GSI query.
+In a relational database, all eight are trivial `SELECT` queries. In DynamoDB, each must be served by a primary key lookup, a GSI query, or an explicitly designed access pattern. The table structure we design next serves all eight.
 
 ### Entities
 
