@@ -25,94 +25,20 @@ This isn't ceremony. It's the difference between an API that's resilient and one
 
 ---
 
-## 3.1 HTTP API vs REST API — Choose Correctly the First Time
+## 3.1 The Event Shape You're Working With
 
-API Gateway comes in two flavours. You need to know the difference because switching later is not painless.
+`sst.aws.ApiGatewayV2` creates an **HTTP API** (API Gateway v2). This is the right choice for Runway: 3.5× cheaper than the older REST API, ~50ms lower p99 latency, and native JWT authoriser support for Cognito. The only time you'd reach for a REST API is if you need built-in API key usage plans or VTL request transformation — neither applies here.
 
-**REST API** (v1) is the original. It's been around since 2015 and has accumulated a lot of features: request/response transformation, built-in authorisers, usage plans, API keys, WAF integration, per-resource caching, and a request/response model that lets you reshape payloads before they reach Lambda.
-
-**HTTP API** (v2) launched in 2019. It's simpler, faster, and cheaper. No payload transformation. No per-resource caching (CloudFront handles that instead). No built-in usage plans. But: lower latency (~10ms vs ~60ms at p99), meaningfully lower cost (roughly a quarter of the price per million requests), and a cleaner event shape.
-
-### The feature comparison that actually matters
-
-| Feature | HTTP API (v2) | REST API (v1) |
-|---------|--------------|---------------|
-| Price (per million requests) | $1.00 | $3.50 |
-| Latency overhead | ~10ms | ~60ms |
-| JWT authorisers (Cognito, etc.) | ✅ Native | Via Lambda authoriser |
-| Lambda authorisers | ✅ | ✅ |
-| CORS | ✅ Configured once | Per-resource |
-| Throttling/rate limits | ✅ Route-level | ✅ Resource-level |
-| Request/response transformation | ❌ | ✅ VTL templates |
-| Built-in API keys / usage plans | ❌ | ✅ |
-| Per-route caching | ❌ | ✅ (expensive) |
-| Private APIs (VPC endpoint) | ✅ | ✅ |
-| WebSocket support | ✅ Separate API type | ✅ Separate API type |
-| WAF (Web Application Firewall) | ✅ | ✅ |
-| X-Ray tracing | ✅ | ✅ |
-| CloudWatch access logs | ✅ | ✅ |
-
-### When to use REST API (it's rare)
-
-Use REST API if you need:
-
-- **Request/response transformation** — reshaping the event payload before Lambda sees it, using VTL templates. Avoid this if possible; it's a maintenance nightmare.
-- **Built-in API keys and usage plans** — for billing external API consumers by tier. If you're building a public API and need to charge per-request with hard quotas, REST API's native usage plans save you building that yourself.
-- **Existing infrastructure** — if you're extending a REST API that's already deployed and tested, don't migrate it just because v2 is newer.
-
-For Runway — and for the vast majority of application APIs — **use HTTP API**. You're using it already from Chapter 1's `sst.aws.ApiGatewayV2`. That component creates an HTTP API.
-
-### The event shape difference
-
-This matters when you're reading the type definitions. REST API sends `APIGatewayProxyEvent`. HTTP API sends `APIGatewayProxyEventV2`. They're different:
-
-REST API event (`v1` — `APIGatewayProxyEvent`):
+One thing to know before reading the type definitions: the HTTP API event shape differs from the REST API shape in a few places that catch people out.
 
 ```typescript
-{
-  httpMethod: "POST",              // top-level
-  path: "/workspaces",             // top-level
-  pathParameters: { ... },
-  queryStringParameters: { ... },
-  body: "...",                      // string | null
-  headers: { ... },
-  requestContext: {
-    requestId: "...",
-    identity: { sourceIp: "..." },
-    // ...
-  }
-}
+// HTTP API v2 — APIGatewayProxyEventV2
+event.requestContext.http.method  // "POST" — nested, not event.httpMethod
+event.body                         // string | undefined — not null
+event.rawQueryString               // always a string, never null
 ```
 
-HTTP API event (`v2` — `APIGatewayProxyEventV2`):
-
-```typescript
-{
-  version: "2.0",
-  rawPath: "/workspaces",          // top-level, always present
-  rawQueryString: "...",           // always present (empty string if none)
-  headers: { ... },
-  requestContext: {
-    requestId: "...",
-    http: {
-      method: "POST",              // nested here, not top-level
-      path: "/workspaces",
-      sourceIp: "...",
-    },
-    // ...
-  },
-  pathParameters: { ... },
-  queryStringParameters: { ... }, // parsed for you
-  body: "...",                      // string | undefined (not null)
-}
-```
-
-Key differences:
-- Method is at `event.requestContext.http.method` in v2, `event.httpMethod` in v1
-- `body` is `string | undefined` in v2 vs `string | null` in v1
-- `rawQueryString` is always present in v2 (empty string instead of null)
-
-Using the wrong type (`APIGatewayProxyHandler` instead of `APIGatewayProxyHandlerV2`) gives you the wrong shape and TypeScript won't catch the property access bugs at compile time. Always use the v2 types.
+Always use `APIGatewayProxyHandlerV2` (and the corresponding `V2` event/result types). Using the v1 types with an HTTP API means TypeScript won't catch property access bugs at compile time.
 
 ---
 
@@ -371,105 +297,44 @@ if (!result.success) {
 
 One source of truth (the schema), two outputs (runtime validation + TypeScript types), structured errors that a client can display field by field.
 
-### Zod schema patterns you'll use constantly
+### Zod patterns used in Runway
 
-Before building Runway's schemas, let's cover the Zod patterns you'll need:
-
-**Strings:**
-```typescript
-z.string()                    // any string
-z.string().min(1)             // non-empty string
-z.string().max(255)           // max length
-z.string().email()            // valid email
-z.string().url()              // valid URL
-z.string().uuid()             // UUID format
-z.string().regex(/pattern/)   // custom regex
-z.string().trim()             // trim whitespace before validation
-z.string().toLowerCase()      // normalise to lowercase
-```
-
-**Numbers:**
-```typescript
-z.number()                    // any number
-z.number().int()              // integer only
-z.number().positive()         // > 0
-z.number().nonnegative()      // >= 0
-z.number().min(1).max(100)    // range
-z.coerce.number()             // coerces string "42" to 42 (for query params)
-```
-
-**Enums:**
-
-`z.enum(["draft", "sent", "paid"])` produces the TypeScript type `"draft" | "sent" | "paid"`. If you already have a `const` array elsewhere in your code, pass it directly to avoid duplication.
+The patterns that actually appear in this book's schemas:
 
 ```typescript
-z.enum(["draft", "sent", "paid"])
+// Strings — the three modifiers you'll reach for most
+z.string().min(1)                          // non-empty
+z.string().trim().max(100)                 // trim then limit
+z.string().regex(/^[a-z0-9-]+$/, "msg")   // format validation
 
-const STATUSES = ["draft", "sent", "paid"] as const;
-z.enum(STATUSES)
+// Numbers — query params arrive as strings, coerce them
+z.number().int().nonnegative()             // e.g. amountCents
+z.coerce.number().int().positive().max(100) // query string limit param
+
+// Enums — produces a union type automatically
+z.enum(["draft", "sent", "paid", "overdue", "cancelled"])
+
+// Optional fields and defaults
+z.string().optional()          // string | undefined
+z.string().default("GBP")      // undefined → "GBP"
+
+// Arrays with minimum length
+z.array(LineItemSchema).min(1) // at least one item required
+
+// Cross-field validation with superRefine
+z.object({ issueDate: z.string(), dueDate: z.string() })
+  .superRefine((data, ctx) => {
+    if (data.dueDate <= data.issueDate) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["dueDate"],
+        message: "Due date must be after issue date",
+      });
+    }
+  });
 ```
 
-**Optional and nullable:**
-```typescript
-z.string().optional()         // string | undefined
-z.string().nullable()         // string | null
-z.string().nullish()          // string | null | undefined
-z.string().default("GBP")     // undefined becomes "GBP"
-```
-
-**Objects:**
-
-`z.object()` strips unknown keys by default. The modifiers `.strict()` (reject unknowns), `.passthrough()` (allow and forward unknowns), `.partial()` (all keys optional), `.required()` (all optional keys required), `.pick({ id: true })`, and `.omit({ id: true })` cover most real-world schema shaping needs.
-
-```typescript
-z.object({
-  id: z.string(),
-  name: z.string(),
-})
-```
-
-**Arrays:**
-```typescript
-z.array(z.string())          // string[]
-z.array(z.string()).min(1)   // non-empty array
-z.array(z.string()).max(10)  // max 10 items
-```
-
-**Custom refinements:**
-
-`.refine()` validates a single value. When you need to validate across multiple fields — or add issues to specific paths — use `.superRefine()`, which gives you access to the Zod context object.
-
-```typescript
-z.string().refine(
-  (val) => val.startsWith("ws_"),
-  { message: "Must be a valid workspace ID" }
-)
-```
-
-```typescript
-z.object({
-  issueDate: z.string(),
-  dueDate: z.string(),
-}).superRefine((data, ctx) => {
-  if (data.dueDate <= data.issueDate) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["dueDate"],
-      message: "Due date must be after issue date",
-    });
-  }
-})
-```
-
-**Transformations:**
-
-`.transform()` changes the output type — the TypeScript return type of the schema becomes the transform's return type, not the input type. `z.coerce` runs a type coercion before validation, which is the right pattern for query string numbers (they arrive as `string`, you want `number`).
-
-```typescript
-z.string().transform(val => val.trim().toLowerCase())
-
-z.coerce.number().int().positive()
-```
+`z.coerce.number()` is the key one for query string parameters — they always arrive as strings, and coerce handles the conversion before validation runs. For everything else Zod supports, the [Zod docs](https://zod.dev) are comprehensive.
 
 ### Runway's schemas
 
@@ -2517,238 +2382,30 @@ export default $config({
 
 ---
 
-## 3.12 The Complete Updated File Structure
+## 3.12 What the Contract Looks Like in Practice
 
-Here's what the project looks like after Chapter 3:
-
-```
-runway/
-├── sst.config.ts
-├── package.json
-├── tsconfig.json
-└── src/
-    ├── functions/                    # Lambda handlers (thin, validated)
-    │   ├── health.ts
-    │   ├── workspaces/
-    │   │   ├── create.ts
-    │   │   ├── get.ts
-    │   │   └── update.ts
-    │   ├── clients/
-    │   │   ├── create.ts
-    │   │   ├── get.ts
-    │   │   ├── list.ts
-    │   │   └── update.ts
-    │   ├── projects/
-    │   │   ├── create.ts
-    │   │   ├── get.ts
-    │   │   ├── list.ts
-    │   │   └── update.ts
-    │   └── invoices/
-    │       ├── create.ts
-    │       ├── get.ts
-    │       ├── list.ts
-    │       ├── send.ts
-    │       └── update.ts
-    ├── schemas/                      # ← New in Chapter 3
-    │   ├── workspace.ts              # Zod schemas + derived input types
-    │   ├── client.ts
-    │   ├── project.ts
-    │   └── invoice.ts
-    ├── services/                     # Business logic (no Lambda deps)
-    │   ├── workspaces.ts
-    │   ├── clients.ts
-    │   ├── projects.ts
-    │   └── invoices.ts
-    ├── lib/
-    │   ├── response.ts               # Response helpers
-    │   ├── logger.ts                 # Structured logging
-    │   ├── errors.ts                 # Error classes
-    │   ├── config.ts                 # Environment validation
-    │   ├── event.ts                  # ← New in Chapter 3: event parsing utilities
-    │   ├── validate.ts               # ← New in Chapter 3: Zod validation middleware
-    │   ├── handler.ts                # ← New in Chapter 3: error handling wrapper
-    │   ├── rateLimit.ts              # ← New in Chapter 3: DynamoDB rate limiting
-    │   └── db/
-    │       └── dynamodb.ts
-    ├── types/                        # Output types (what the API returns)
-    │   ├── workspace.ts
-    │   ├── client.ts
-    │   ├── project.ts
-    │   └── invoice.ts
-    └── test/
-        ├── helpers.ts
-        └── setup.ts
-```
-
-The `schemas/` directory is the new addition. Input types moved there. Output types stay in `types/`. The separation is deliberate: schemas define what the API accepts, types define what the API returns.
-
----
-
-## 3.13 What the API Contract Looks Like
-
-Let's make the API contract concrete. Here's what a client should expect from each endpoint.
-
-### POST /v1/workspaces
+Here's the invoice creation endpoint as a complete example — this is the response shape every client consumes:
 
 ```
-Request:
-  Content-Type: application/json
-  X-User-Id: user_abc123
+POST /v1/workspaces/{workspaceId}/invoices
 
-  {
-    "name": "Acme Creative",
-    "slug": "acme-creative"
-  }
+Request body:
+  { "clientId": "cli_abc123", "lineItems": [...], "currency": "GBP",
+    "issueDate": "2025-03-01", "dueDate": "2025-03-31" }
 
-Response 201:
-  {
-    "data": {
-      "id": "ws_xK9mN3pQ",
-      "name": "Acme Creative",
-      "slug": "acme-creative",
-      "ownerId": "user_abc123",
-      "plan": "free",
-      "createdAt": "2025-03-01T10:00:00.000Z",
-      "updatedAt": "2025-03-01T10:00:00.000Z"
-    }
-  }
+201 Created:
+  { "data": { "id": "inv_mN8kP2xR", "status": "draft", "total": 630000, ... } }
 
-Response 422 (invalid slug):
-  {
-    "error": {
-      "code": "UNPROCESSABLE",
-      "message": "Validation failed",
-      "fields": {
-        "slug": ["Slug can only contain lowercase letters, numbers, and hyphens"]
-      }
-    }
-  }
+422 Unprocessable (bad dates):
+  { "error": { "code": "UNPROCESSABLE", "message": "Validation failed",
+    "fields": { "dueDate": ["Due date must be after issue date"] } } }
 
-Response 409 (slug taken):
-  {
-    "error": {
-      "code": "CONFLICT",
-      "message": "A workspace with slug \"acme-creative\" already exists"
-    }
-  }
+422 Unprocessable (invalid field):
+  { "error": { "code": "UNPROCESSABLE", "message": "Validation failed",
+    "fields": { "lineItems": ["Array must contain at least 1 element(s)"] } } }
 ```
 
-### POST /v1/workspaces/{workspaceId}/invoices
-
-```
-Request:
-  Content-Type: application/json
-
-  {
-    "clientId": "cli_abc123",
-    "projectId": "proj_xyz789",
-    "lineItems": [
-      {
-        "description": "Website redesign — March 2025",
-        "quantity": 1,
-        "unitPriceCents": 500000,
-        "amountCents": 500000
-      },
-      {
-        "description": "Hosting setup",
-        "quantity": 1,
-        "unitPriceCents": 25000,
-        "amountCents": 25000
-      }
-    ],
-    "currency": "GBP",
-    "issueDate": "2025-03-01",
-    "dueDate": "2025-03-31",
-    "notes": "Payment by bank transfer to sort code 12-34-56, account 12345678."
-  }
-
-Response 201:
-  {
-    "data": {
-      "id": "inv_mN8kP2xR",
-      "workspaceId": "ws_xK9mN3pQ",
-      "invoiceNumber": "INV-0042",
-      "clientId": "cli_abc123",
-      "projectId": "proj_xyz789",
-      "status": "draft",
-      "lineItems": [
-        { "description": "Website redesign — March 2025", "quantity": 1, "unitPriceCents": 500000, "amountCents": 500000 },
-        { "description": "Hosting setup", "quantity": 1, "unitPriceCents": 25000, "amountCents": 25000 }
-      ],
-      "subtotal": 525000,
-      "tax": 105000,
-      "total": 630000,
-      "currency": "GBP",
-      "issueDate": "2025-03-01",
-      "dueDate": "2025-03-31",
-      "notes": "Payment by bank transfer...",
-      "createdAt": "2025-03-01T10:00:00.000Z",
-      "updatedAt": "2025-03-01T10:00:00.000Z"
-    }
-  }
-
-Response 422 (invalid dates):
-  {
-    "error": {
-      "code": "UNPROCESSABLE",
-      "message": "Validation failed",
-      "fields": {
-        "dueDate": ["Due date must be on or after issue date"]
-      }
-    }
-  }
-
-Response 422 (line item amount wrong):
-  {
-    "error": {
-      "code": "UNPROCESSABLE",
-      "message": "Validation failed",
-      "fields": {
-        "lineItems.0.amountCents": ["amountCents (400000) does not match quantity × unitPriceCents (500000)"]
-      }
-    }
-  }
-
-Response 404 (client not found):
-  {
-    "error": {
-      "code": "CLIENT_NOT_FOUND",
-      "message": "Client cli_abc123 not found"
-    }
-  }
-```
-
-### GET /v1/workspaces/{workspaceId}/invoices
-
-```
-Request:
-  GET /v1/workspaces/ws_xK9mN3pQ/invoices?status=draft&limit=10
-
-Response 200:
-  {
-    "data": {
-      "invoices": [
-        { "id": "inv_mN8kP2xR", ... },
-        { "id": "inv_pQ4xR7sT", ... }
-      ],
-      "total": 2,
-      "cursor": null
-    }
-  }
-
-Response 422 (invalid status):
-  {
-    "error": {
-      "code": "UNPROCESSABLE",
-      "message": "Invalid query parameters",
-      "fields": {
-        "status": ["Invalid enum value. Expected 'draft' | 'sent' | 'paid' | 'overdue' | 'cancelled', received 'pending'"]
-      }
-    }
-  }
-```
-
-The validation errors are machine-parseable and human-readable. A React form can display them next to the right input. A mobile app can highlight the right field. A CLI tool can print them clearly.
+The `fields` map in a 422 response keys directly to the field names in the request body. A frontend can display these errors next to the right inputs without any custom parsing.
 
 ---
 

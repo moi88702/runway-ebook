@@ -65,42 +65,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
 };
 ```
 
-**SQS consumer**
-
-`event.Records` is an array of messages. Each `record.body` is the raw message string — JSON.parse it to get your payload. SQS handlers return void, not an HTTP response. To reject a message and send it to the DLQ after retries, throw an error.
-
-```typescript
-export const handler: SQSHandler = async (event, context) => {
-  for (const record of event.Records) {
-    const message = JSON.parse(record.body);
-    // process message...
-  }
-};
-```
-
-**Scheduled handler**
-
-Triggered by an EventBridge rule on a cron schedule. `event.source` is always `"aws.events"`, `event["detail-type"]` is `"Scheduled Event"`, and `event.time` is the scheduled fire time as an ISO string.
-
-```typescript
-export const handler: ScheduledHandler = async (event, context) => {
-  // your scheduled job logic here
-};
-```
-
-**S3 event handler**
-
-Triggered when an object is created or deleted in a linked bucket. Each record gives you the bucket name and object key. Always decode the key — S3 URL-encodes special characters and replaces spaces with `+`.
-
-```typescript
-export const handler: S3Handler = async (event, context) => {
-  for (const record of event.Records) {
-    const bucket = record.s3.bucket.name;
-    const key = decodeURIComponent(record.s3.object.key.replace(/\+/g, " "));
-    // process the uploaded file...
-  }
-};
-```
+The other handler types from `@types/aws-lambda` follow the same pattern — `SQSHandler` (Chapter 8), `ScheduledHandler` (Chapter 8), `S3Handler` (Chapter 6) — each typed to their specific event shape. We'll introduce them properly in the chapters where they're used.
 
 ### Why `async (event, context)` matters
 
@@ -108,17 +73,12 @@ Always include `context` in your handler signature. You might not use it in ever
 
 **`context.requestId`** is the Lambda request ID — a UUID that identifies this specific invocation. When you log it with every log entry, you can filter CloudWatch Logs to a single request and see everything that happened. Without it, debugging concurrent requests is guesswork.
 
-**`context.getRemainingTimeInMillis()`** tells you how much of the Lambda timeout is left. If you're in a loop processing items and you want to stop before Lambda hard-kills you, this is how you do it safely:
+**`context.getRemainingTimeInMillis()`** tells you how much of the Lambda timeout is left. If you're in a loop and want to stop before Lambda hard-kills you — relevant for batch jobs and queue workers — this is how you do it safely:
 
 ```typescript
-export const handler: SQSHandler = async (event, context) => {
-  for (const record of event.Records) {
-    if (context.getRemainingTimeInMillis() < 5000) {
-      break;
-    }
-    await processRecord(record);
-  }
-};
+if (context.getRemainingTimeInMillis() < 5000) {
+  break; // stop processing, allow the current batch to complete cleanly
+}
 ```
 
 The type signature for `async (event, context)` is:
