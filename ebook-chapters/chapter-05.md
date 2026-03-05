@@ -111,11 +111,11 @@ export default $config({
 
 `sst.aws.Vpc` creates a VPC with public and private subnets across two availability zones — the minimum Aurora requires for multi-AZ. SST handles the subnet creation, route tables, and internet gateway automatically.
 
-`sst.aws.Aurora` creates the Aurora Serverless v2 cluster, the subnet group, and the security group allowing Lambda → Aurora traffic. The `link: [db]` on the Lambda routes injects `DATABASE_URL` as an environment variable and grants the necessary VPC permissions.
+`sst.aws.Aurora` creates the Aurora Serverless v2 cluster, the subnet group, and the security group allowing Lambda → Aurora traffic. The `link: [db]` on the Lambda routes exposes the Aurora connection details via `Resource.RunwayDb` and grants the necessary VPC permissions.
 
 ### Credentials and secret rotation
 
-Aurora generates a master username and password. SST stores these in AWS Secrets Manager and injects them as `DATABASE_URL` when you link `db` to a function. You never see the password in your code or environment files.
+Aurora generates a master username and password. SST stores these in AWS Secrets Manager and injects them at runtime via the `Resource` object when you link `db` to a function. You never see the password in your code or environment files.
 
 The linked `db` resource exposes these fields on `Resource.RunwayDb`: `host` (Aurora endpoint), `port` (5432 for Postgres), `database`, `username`, and `password` (injected at runtime from Secrets Manager — never in your code).
 
@@ -189,19 +189,17 @@ npx prisma init
 
 Prisma creates a `prisma/` directory with `schema.prisma`. Update it for Runway's reporting model:
 
-The `driverAdapters` preview feature switches Prisma to the WASM query engine (~6MB vs the default ~50MB native binary). This is essential for Lambda's package size limits.
+Prisma v7 uses the WASM query engine by default when a driver adapter is configured (~6MB vs the default ~50MB native binary). This is essential for Lambda's package size limits — and in v7, it requires no extra configuration.
 
 ```prisma
 // prisma/schema.prisma
 
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model Workspace {
@@ -239,12 +237,11 @@ Notice the denormalised `clientName` and `projectName`. In a reporting database,
 
 Prisma's default query engine is a native binary (~50MB). Lambda has a package size limit of 250MB (unzipped). More importantly, large packages mean slower cold starts.
 
-The solution: the Prisma WASM engine, which is ~6MB and works in any environment.
+The solution: the Prisma WASM engine, which is ~6MB and works in any environment. In Prisma v7 this is the default when you use a driver adapter — no `previewFeatures` flag needed.
 
 ```prisma
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+  provider = "prisma-client-js"
 }
 ```
 
