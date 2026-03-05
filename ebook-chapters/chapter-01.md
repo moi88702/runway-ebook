@@ -1,24 +1,25 @@
 # Chapter 1: Setting Up SST v3
 
-## The App We're Building
+## What This Chapter Does
 
-Every tutorial has a to-do app. This book has **Runway**.
+You have the prerequistes. You know what Runway is. This chapter gets you from zero to a running SST project with a real endpoint live on AWS — the foundation that every subsequent chapter builds on.
 
-Runway is a client portal and invoicing SaaS for freelancers and small agencies. By the time you finish this book, you'll have built the entire backend: authentication, a type-safe REST API, a DynamoDB database for day-to-day data, Aurora Serverless for financial reporting, S3 for file storage, async queues for notifications, scheduled jobs for automated reminders, and a CI/CD pipeline that deploys to production without you touching a server.
+Here's the full roadmap, so you can see where Chapter 1 sits in the build:
 
-Here's what Runway does:
-- Freelancers sign up and create a workspace
-- They add clients and projects to their workspace
-- They upload deliverables and generate invoices
-- Clients get a portal to view projects and download invoices
-- Automated reminders chase late payments
-- End-of-month reports summarise revenue
+```
+Chapter 1:  [API Gateway] → [Lambda: health check]        ← you are here
+Chapter 2:  [API Gateway] → [Lambda: workspaces, invoices]
+Chapter 3:  type-safe validation on every route
+Chapter 4:  [DynamoDB] ← real data behind every handler
+Chapter 5:  [Aurora Serverless] ← relational reporting
+Chapter 6:  [S3] ← file uploads and invoice PDFs
+Chapter 7:  [Cognito] ← authentication and user scoping
+Chapter 8:  [SQS + EventBridge] ← async queues and events
+Chapter 9:  [GitHub Actions] ← automated deploys
+Chapter 10: [CloudWatch] ← monitoring and alerting
+```
 
-Each chapter of this book adds a layer to this system. By the end, you'll have a real, deployable SaaS backend — not a contrived example that falls apart the moment you try to apply it to something real.
-
-You'll also have opinions. AWS has a hundred ways to solve any given problem, and this book is going to tell you which one to use. Not because the others are wrong, but because you need to start somewhere and "it depends" is not a useful answer when you're trying to ship.
-
-Let's get started.
+By the end of this chapter you'll have SST installed, a dev environment running against real AWS infrastructure, and a clear mental model of how SST's components fit together.
 
 ---
 
