@@ -848,6 +848,7 @@ The appendices cover the things that didn't fit cleanly into the chapter flow:
 - **Appendix C** — SST component cheat sheet
 - **Appendix D** — TypeScript patterns reference (`satisfies`, discriminated unions, branded types)
 - **Appendix E** — Cost estimation at 1k, 10k, and 100k users
+- **Appendix F** — Runway data model reference: all 7 entities, 3 indexes, and 24 access patterns in one place
 
 If you've read this far and built Runway alongside it: you know more about running TypeScript on AWS than most teams who've been doing it for years. The gap isn't knowledge — it's taking the time to get it right.
 

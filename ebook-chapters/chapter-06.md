@@ -98,22 +98,22 @@ The CORS configuration on `deliverablesBucket` allows the browser to PUT directl
 ```typescript
 // sst.config.ts — API routes for file operations
 
-api.route("POST /workspaces/{workspaceId}/projects/{projectId}/deliverables/upload-url", {
+api.route("POST /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/upload-url", {
   handler: "src/functions/deliverables/create-upload-url.handler",
   link: [deliverablesBucket],
 });
 
-api.route("POST /workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/confirm", {
+api.route("POST /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/confirm", {
   handler: "src/functions/deliverables/confirm-upload.handler",
   link: [deliverablesBucket, table],
 });
 
-api.route("GET /workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/download", {
+api.route("GET /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/download", {
   handler: "src/functions/deliverables/get-download-url.handler",
   link: [deliverablesBucket, table],
 });
 
-api.route("GET /workspaces/{workspaceId}/invoices/{invoiceId}/download", {
+api.route("GET /v1/workspaces/{workspaceId}/invoices/{invoiceId}/download", {
   handler: "src/functions/invoices/get-download-url.handler",
   link: [invoicesBucket, table],
 });
@@ -191,7 +191,7 @@ import { Resource } from "sst";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { s3Client } from "../../lib/s3";
-import { ok, badRequest, forbidden } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 import { getWorkspaceMembership } from "../../repositories/workspaces";
 
@@ -232,30 +232,30 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const projectId = event.pathParameters?.projectId;
 
   if (!workspaceId || !projectId) {
-    return badRequest("Missing path parameters");
+    return res.badRequest("Missing path parameters");
   }
 
   let body: z.infer<typeof requestSchema>;
   try {
     body = requestSchema.parse(JSON.parse(event.body ?? "{}"));
   } catch {
-    return badRequest("Invalid request body");
+    return res.badRequest("Invalid request body");
   }
 
   const { filename, contentType, sizeBytes } = body;
 
   if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
-    return badRequest(`Content type not allowed: ${contentType}`);
+    return res.badRequest(`Content type not allowed: ${contentType}`);
   }
 
   const userId = event.headers["x-user-id"]; // Chapter 7 replaces this with JWT extraction
   if (!userId) {
-    return forbidden("Authentication required");
+    return res.forbidden("Authentication required");
   }
 
   const membership = await getWorkspaceMembership(workspaceId, userId);
   if (!membership) {
-    return forbidden("Not a member of this workspace");
+    return res.forbidden("Not a member of this workspace");
   }
 
   const fileId = randomUUID();
@@ -286,7 +286,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     sizeBytes,
   });
 
-  return ok({
+  return res.ok({
     uploadUrl,
     key,
     fileId,
@@ -324,7 +324,7 @@ import { GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Resource } from "sst";
 import { s3Client } from "../../lib/s3";
-import { ok, notFound, forbidden, serverError } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 import { getDeliverable } from "../../repositories/deliverables";
 import { getWorkspaceMembership } from "../../repositories/workspaces";
@@ -337,29 +337,29 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const deliverableId = event.pathParameters?.deliverableId;
 
   if (!workspaceId || !projectId || !deliverableId) {
-    return notFound("Not found");
+    return res.notFound("Not found");
   }
 
   const userId = event.headers["x-user-id"];
   if (!userId) {
-    return forbidden("Authentication required");
+    return res.forbidden("Authentication required");
   }
 
   const membership = await getWorkspaceMembership(workspaceId, userId);
   if (!membership) {
-    return forbidden("Access denied");
+    return res.forbidden("Access denied");
   }
 
   const deliverable = await getDeliverable(workspaceId, projectId, deliverableId);
   if (!deliverable) {
-    return notFound("Deliverable not found");
+    return res.notFound("Deliverable not found");
   }
 
   const key = deliverable.s3Key;
 
   if (!key.startsWith(`workspaces/${workspaceId}/`)) {
     logger.error("Key workspace mismatch", { key, workspaceId, deliverableId });
-    return forbidden("Access denied");
+    return res.forbidden("Access denied");
   }
 
   try {
@@ -371,7 +371,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     );
   } catch (err: unknown) {
     if ((err as { name?: string }).name === "NotFound") {
-      return notFound("File not found");
+      return res.notFound("File not found");
     }
     throw err;
   }
@@ -390,7 +390,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     userId,
   });
 
-  return ok({
+  return res.ok({
     downloadUrl,
     filename: deliverable.filename,
     contentType: deliverable.contentType,
@@ -595,7 +595,7 @@ import { HeadObjectCommand } from "@aws-sdk/client-s3";
 import { Resource } from "sst";
 import { z } from "zod";
 import { s3Client } from "../../lib/s3";
-import { ok, badRequest, forbidden, notFound, conflict } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 import { createDeliverable, getDeliverable } from "../../repositories/deliverables";
 import { getWorkspaceMembership } from "../../repositories/workspaces";
@@ -617,29 +617,29 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const deliverableId = event.pathParameters?.deliverableId;
 
   if (!workspaceId || !projectId || !deliverableId) {
-    return badRequest("Missing path parameters");
+    return res.badRequest("Missing path parameters");
   }
 
   const userId = event.headers["x-user-id"];
   if (!userId) {
-    return forbidden("Authentication required");
+    return res.forbidden("Authentication required");
   }
 
   const membership = await getWorkspaceMembership(workspaceId, userId);
   if (!membership) {
-    return forbidden("Access denied");
+    return res.forbidden("Access denied");
   }
 
   let body: z.infer<typeof requestSchema>;
   try {
     body = requestSchema.parse(JSON.parse(event.body ?? "{}"));
   } catch {
-    return badRequest("Invalid request body");
+    return res.badRequest("Invalid request body");
   }
 
   const expectedKeyPrefix = `workspaces/${workspaceId}/projects/${projectId}/deliverables/${deliverableId}/`;
   if (!body.key.startsWith(expectedKeyPrefix)) {
-    return forbidden("Invalid key");
+    return res.forbidden("Invalid key");
   }
 
   let s3Metadata: Record<string, string>;
@@ -653,14 +653,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     s3Metadata = head.Metadata ?? {};
   } catch (err: unknown) {
     if ((err as { name?: string }).name === "NotFound") {
-      return notFound("File not found in S3 — upload may have failed or not yet completed");
+      return res.notFound("File not found in S3 — upload may have failed or not yet completed");
     }
     throw err;
   }
 
   const existing = await getDeliverable(workspaceId, projectId, deliverableId);
   if (existing) {
-    return ok(existing);
+    return res.ok(existing);
   }
 
   const deliverable = await createDeliverable({
@@ -685,7 +685,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     sizeBytes: body.sizeBytes,
   });
 
-  return ok(deliverable);
+  return res.ok(deliverable);
 };
 ```
 
@@ -1194,7 +1194,7 @@ This flow triggers when a freelancer requests to generate their invoice. The Lam
 
 ```typescript
 // sst.config.ts — add the invoice generation route
-api.route("POST /workspaces/{workspaceId}/invoices/{invoiceId}/generate-pdf", {
+api.route("POST /v1/workspaces/{workspaceId}/invoices/{invoiceId}/generate-pdf", {
   handler: "src/functions/invoices/generate-pdf.handler",
   link: [invoicesBucket, table],
   timeout: "30 seconds",
@@ -1219,7 +1219,7 @@ import { Resource } from "sst";
 import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
 import { s3Client } from "../../lib/s3";
-import { ok, notFound, forbidden, serverError } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 import { getInvoice } from "../../repositories/invoices";
 import { getWorkspaceMembership } from "../../repositories/workspaces";
@@ -1232,22 +1232,22 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const invoiceId = event.pathParameters?.invoiceId;
 
   if (!workspaceId || !invoiceId) {
-    return notFound("Not found");
+    return res.notFound("Not found");
   }
 
   const userId = event.headers["x-user-id"];
   if (!userId) {
-    return forbidden("Authentication required");
+    return res.forbidden("Authentication required");
   }
 
   const membership = await getWorkspaceMembership(workspaceId, userId);
   if (!membership) {
-    return forbidden("Access denied");
+    return res.forbidden("Access denied");
   }
 
   const invoice = await getInvoice(workspaceId, invoiceId);
   if (!invoice) {
-    return notFound("Invoice not found");
+    return res.notFound("Invoice not found");
   }
 
   logger.info("Generating invoice PDF", { workspaceId, invoiceId });
@@ -1286,7 +1286,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     key,
   });
 
-  return ok({
+  return res.ok({
     downloadUrl,
     key,
     expiresIn: 72 * 60 * 60,
@@ -1553,7 +1553,7 @@ To verify in the AWS Console: S3 → your bucket → Permissions → Block publi
 The access pattern for deliverables has an important property: the workspace ID is in the key path, and Lambda checks workspace membership before generating any URL.
 
 ```
-Browser → GET /workspaces/{workspaceId}/projects/{projectId}/deliverables/{id}/download
+Browser → GET /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/{id}/download
             ↓
          Lambda: "Does this user belong to workspaceId?"
             ↓ Yes
@@ -1721,7 +1721,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { Resource } from "sst";
 import { s3Client } from "../../lib/s3";
-import { ok, notFound, forbidden } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 import { getDeliverable, deleteDeliverable } from "../../repositories/deliverables";
 import { getWorkspaceMembership } from "../../repositories/workspaces";
@@ -1734,22 +1734,22 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const deliverableId = event.pathParameters?.deliverableId;
 
   if (!workspaceId || !projectId || !deliverableId) {
-    return notFound("Not found");
+    return res.notFound("Not found");
   }
 
   const userId = event.headers["x-user-id"];
   if (!userId) {
-    return forbidden("Authentication required");
+    return res.forbidden("Authentication required");
   }
 
   const membership = await getWorkspaceMembership(workspaceId, userId);
   if (!membership) {
-    return forbidden("Access denied");
+    return res.forbidden("Access denied");
   }
 
   const deliverable = await getDeliverable(workspaceId, projectId, deliverableId);
   if (!deliverable) {
-    return notFound("Deliverable not found");
+    return res.notFound("Deliverable not found");
   }
 
   await deleteDeliverable(workspaceId, projectId, deliverableId);
@@ -1781,7 +1781,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     });
   }
 
-  return ok({ deleted: true });
+  return res.ok({ deleted: true });
 };
 ```
 
@@ -1827,7 +1827,7 @@ In AWS Cost Explorer, filter by tag to see monthly S3 costs per bucket. Set a bu
 
 ---
 
-## 6.8 Putting It All Together
+## 6.8 The Complete Configuration
 
 Here's the complete updated `sst.config.ts` for Chapter 6, with both buckets, their event triggers, and the API routes wired together:
 
@@ -1959,7 +1959,7 @@ export default $config({
 
     // ─── Deliverable Routes ──────────────────────────────────────────────────
     api.route(
-      "POST /workspaces/{workspaceId}/projects/{projectId}/deliverables/upload-url",
+      "POST /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/upload-url",
       {
         handler: "src/functions/deliverables/create-upload-url.handler",
         link: [deliverablesBucket, table],
@@ -1967,7 +1967,7 @@ export default $config({
     );
 
     api.route(
-      "POST /workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/confirm",
+      "POST /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/confirm",
       {
         handler: "src/functions/deliverables/confirm-upload.handler",
         link: [deliverablesBucket, table],
@@ -1975,7 +1975,7 @@ export default $config({
     );
 
     api.route(
-      "GET /workspaces/{workspaceId}/projects/{projectId}/deliverables",
+      "GET /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables",
       {
         handler: "src/functions/deliverables/list.handler",
         link: [table],
@@ -1983,7 +1983,7 @@ export default $config({
     );
 
     api.route(
-      "GET /workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/download",
+      "GET /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}/download",
       {
         handler: "src/functions/deliverables/get-download-url.handler",
         link: [deliverablesBucket, table],
@@ -1991,7 +1991,7 @@ export default $config({
     );
 
     api.route(
-      "DELETE /workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}",
+      "DELETE /v1/workspaces/{workspaceId}/projects/{projectId}/deliverables/{deliverableId}",
       {
         handler: "src/functions/deliverables/delete.handler",
         link: [deliverablesBucket, table],
@@ -2000,7 +2000,7 @@ export default $config({
 
     // ─── Invoice Routes ──────────────────────────────────────────────────────
     api.route(
-      "POST /workspaces/{workspaceId}/invoices/{invoiceId}/generate-pdf",
+      "POST /v1/workspaces/{workspaceId}/invoices/{invoiceId}/generate-pdf",
       {
         handler: "src/functions/invoices/generate-pdf.handler",
         link: [invoicesBucket, table],
@@ -2010,7 +2010,7 @@ export default $config({
     );
 
     api.route(
-      "GET /workspaces/{workspaceId}/invoices/{invoiceId}/download",
+      "GET /v1/workspaces/{workspaceId}/invoices/{invoiceId}/download",
       {
         handler: "src/functions/invoices/get-download-url.handler",
         link: [invoicesBucket, table],
@@ -2370,4 +2370,4 @@ The storage foundation is solid. The gap that remains — and you'll notice it t
 
 ---
 
-> **The code for this chapter** is available at `06-s3-file-uploads/` in the companion repository. Run `npm install && npx sst dev` to start it. To test the upload flow end-to-end, use the test script at `scripts/test-upload.ts`.
+> **The code for this chapter** is on the `chapter-6` branch of the companion repository. Run `npm install && npx sst dev` to start it. To test the upload flow end-to-end, use the test script at `scripts/test-upload.ts`.

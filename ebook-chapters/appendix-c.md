@@ -333,25 +333,26 @@ Outputs: `userPool.id` (User Pool ID), `client.id` (App Client ID — audience f
 Encrypted secret stored in SSM Parameter Store. Never in CloudFormation or Lambda env vars in plaintext.
 
 ```typescript
-const mailgunKey = new sst.Secret("MailgunApiKey");
 const stripeSecret = new sst.Secret("StripeWebhookSecret");
 ```
 
 Set values via CLI:
 ```bash
-npx sst secret set MailgunApiKey "key-xxx" --stage production
-npx sst secret set MailgunApiKey "key-test-xxx" --stage dev
+npx sst secret set StripeWebhookSecret "whsec-xxx" --stage production
+npx sst secret set StripeWebhookSecret "whsec-test-xxx" --stage dev
 npx sst secret list --stage production   # Shows names, not values
 ```
 
 In Lambda (link it):
 ```typescript
 const fn = new sst.aws.Function("Handler", {
-  link: [mailgunKey],
+  link: [stripeSecret],
 });
 ```
 
-In Lambda: `Resource.MailgunApiKey.value` (resolved at runtime from SSM Parameter Store).
+In Lambda: `Resource.StripeWebhookSecret.value` (resolved at runtime from SSM Parameter Store).
+
+> **Note on SES:** Email sending via SES does not require an SST secret. SES access is granted through the Lambda execution role (IAM), and the sender address is passed as a plain environment variable (`SES_FROM_ADDRESS`). No API key, no secret rotation.
 
 ---
 
@@ -421,6 +422,6 @@ All fields are only available if the resource is in `link: []`. TypeScript will 
 | `Resource.EmailQueue.url` | SQS queue URL |
 | `Resource.RunwayDeliverables.name` | S3 bucket name |
 | `Resource.RunwayDb.host` | Aurora cluster endpoint |
-| `Resource.MailgunApiKey.value` | Secret value (from SSM) |
+| `Resource.StripeWebhookSecret.value` | Secret value (from SSM) |
 
 If a resource isn't linked, TypeScript will tell you at build time. You won't discover it at 2am when the Lambda explodes.

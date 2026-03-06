@@ -84,7 +84,7 @@ This book assumes you know TypeScript and have used AWS before. It does not assu
 ### What you will need
 
 - An AWS account with administrator access (or an IAM user with broad permissions — Appendix A has the policy)
-- Node.js 18+ and npm
+- Node.js 22+ and npm
 - Git
 - A terminal you are comfortable in
 - Approximately 10–15 hours to work through the full book at a reasonable pace

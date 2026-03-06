@@ -452,7 +452,7 @@ Chapter 1:  [API Gateway] → [Lambda: health]
 Chapter 2:  [API Gateway] → [Lambda: workspaces, projects, invoices]
 Chapter 3:  [API Gateway] → [Lambda: ...] with Zod validation + typed responses
 Chapter 4:  [DynamoDB]    ← [Lambda: workspaces, projects, invoices]
-Chapter 5:  [Aurora]      ← [Lambda: reports] + RDS event → Lambda triggers
+Chapter 5:  [Aurora Serverless] ← [Lambda: reporting queries, payment records]
 Chapter 6:  [S3]          ← [Lambda: deliverables, invoice PDFs]
 Chapter 7:  [Cognito]     ← [API Gateway authoriser] + user-scoped data
 Chapter 8:  [SQS]         ← [Lambda: notifications, reminders]
@@ -466,4 +466,4 @@ In the next chapter, we'll write the Lambda functions that handle Runway's core 
 
 ---
 
-> **The code for this chapter** is available at `01-setting-up-sst-v3/` in the companion repository. Run `npm install && npx sst dev` to start it.
+> **The code for this chapter** is on the `chapter-1` branch of the companion repository. Run `npm install && npx sst dev` to start it.

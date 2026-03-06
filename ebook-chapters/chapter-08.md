@@ -2,7 +2,7 @@
 
 Runway's API is fast, authenticated, and typed end-to-end. But there's a class of work it shouldn't do in the API request itself.
 
-When a freelancer marks an invoice as paid, three things need to happen: the invoice status updates in the database, a receipt email goes to the client, and Runway's internal analytics get updated. You could do all three synchronously in the handler. You probably shouldn't. The email provider might be slow. The analytics write might fail. And now a simple invoice update takes 600ms and fails with a 500 when Mailgun has a bad moment.
+When a freelancer marks an invoice as paid, three things need to happen: the invoice status updates in the database, a receipt email goes to the client, and Runway's internal analytics get updated. You could do all three synchronously in the handler. You probably shouldn't. The email provider might be slow. The analytics write might fail. And now a simple invoice update takes 600ms and fails with a 500 when SES has a bad moment.
 
 The fix is async. Hand off work that doesn't need to happen before you return 200. Let queues absorb traffic spikes. Let events decouple parts of your system so they can fail independently. Let cron handle the work nobody requested but everyone expects to happen.
 
@@ -24,7 +24,7 @@ Most of what happens after a user action doesn't need to be in the response path
 
 All of these can happen after you return 200. And because they happen later, a few things become true:
 
-**Your API stays fast.** You're not blocked on Mailgun, Slack, or a PDF generator. The user gets their response in under 100ms.
+**Your API stays fast.** You're not blocked on SES, Slack, or a PDF generator. The user gets their response in under 100ms.
 
 **Your system is more resilient.** If the email provider is down, the invoice still got saved. The email will retry. The user never knew anything was wrong.
 
@@ -880,7 +880,7 @@ Start with polling. Add WebSockets when users complain about it.
 
 ---
 
-## 8.6 Putting It Together: Runway's Async Architecture
+## 8.6 Runway's Async Architecture
 
 Here's how the async layer fits into Runway:
 
@@ -894,7 +894,7 @@ Invoice marked as paid
   │     ├─ Notification worker: push notification to freelancer
   │     └─ (future: Xero sync, Slack notification, etc.)
   │
-  └─ SQS: queue receipt email → Email worker → Mailgun
+  └─ SQS: queue receipt email → Email worker → SES
               (with dedup guard, retry, DLQ)
 
 Invoice chaser (cron, 9am daily)
@@ -946,4 +946,4 @@ Chapter 9 covers deploying all of this reliably: CI/CD, preview environments, Gi
 
 ---
 
-> **The code for this chapter** is available at `08-queues-events-background-jobs/` in the companion repository.
+> **The code for this chapter** is on the `chapter-8` branch of the companion repository.

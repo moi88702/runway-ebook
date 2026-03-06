@@ -79,9 +79,10 @@ SST_STAGE=dev
 # In production, Prisma connects via the SST Resource binding
 DATABASE_URL=postgresql://runway:password@localhost:5432/runway_dev
 
-# Email provider (Mailgun)
-# In production, set via: npx sst secret set MailgunApiKey "..."
-MAILGUN_API_KEY=
+# Email (AWS SES)
+# SES uses IAM permissions — no API key needed.
+# Set the verified sender address as an environment variable.
+SES_FROM_ADDRESS=invoices@runway.so
 
 # Stripe webhook secret for local testing via Stripe CLI
 STRIPE_WEBHOOK_SECRET=
@@ -594,8 +595,8 @@ npx sst remove --stage pr-<number> --force
 
 ## Secret Leaked — Immediate Response
 
-1. Rotate the credential at the provider (Mailgun, Stripe, etc.) — do this before anything else
-2. Update in SST: `npx sst secret set MailgunApiKey "new-key" --stage production`
+1. Rotate the credential at the provider (Stripe, etc.) — do this before anything else
+2. Update in SST: `npx sst secret set StripeWebhookSecret "new-key" --stage production`
 3. Redeploy to pick up the new value: `npx sst deploy --stage production`
 4. Scrub from git history if it was committed: `git filter-repo --path .env --invert-paths`
 5. Force-push all branches: `git push --force --all`
@@ -622,7 +623,7 @@ The RUNBOOK.md is a living document. Every time you fix a production incident, a
 
 ## 9.5 Secrets Management in CI
 
-Runway has secrets: database credentials, Mailgun API keys, Stripe webhook secrets. They need to be available in production Lambdas without appearing in the codebase or the CI logs.
+Runway has secrets: database credentials, Stripe webhook secrets. They need to be available in production Lambdas without appearing in the codebase or the CI logs.
 
 ### SST Secrets
 
@@ -630,25 +631,27 @@ SST's secrets system stores values in AWS SSM Parameter Store, encrypted with KM
 
 ```bash
 # Set a secret for the production stage
-npx sst secret set MailgunApiKey "key-xxxxx" --stage production
+npx sst secret set StripeWebhookSecret "whsec_xxxxx" --stage production
 
 # List secrets (shows names, not values)
 npx sst secret list --stage production
 
 # Remove a secret
-npx sst secret remove MailgunApiKey --stage production
+npx sst secret remove StripeWebhookSecret --stage production
 ```
 
 Wire it in `sst.config.ts`:
 
 ```typescript
 // sst.config.ts
-const mailgunKey        = new sst.Secret("MailgunApiKey");
-const stripeWebhookKey  = new sst.Secret("StripeWebhookSecret");
+const stripeWebhookKey = new sst.Secret("StripeWebhookSecret");
 
 const sharedFunctionConfig = {
-  link: [table, emailQueue, eventBus, mailgunKey, stripeWebhookKey],
-  environment: { SST_STAGE: $app.stage },
+  link: [table, emailQueue, eventBus, stripeWebhookKey],
+  environment: {
+    SST_STAGE: $app.stage,
+    SES_FROM_ADDRESS: "invoices@runway.so",
+  },
 };
 ```
 
@@ -656,13 +659,21 @@ Read in a Lambda:
 
 ```typescript
 // src/workers/email.ts
-import { Resource } from "sst";
+import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 
-// Resource.MailgunApiKey.value resolves at runtime from SSM
-const mailgunClient = new Mailgun({
-  apiKey:  Resource.MailgunApiKey.value,
-  domain:  "mail.runwayapp.com",
-});
+// SES uses IAM — no API key needed, permissions are granted via the Lambda execution role
+const ses = new SESClient({ region: process.env.AWS_REGION });
+
+async function sendEmail(to: string, subject: string, body: string) {
+  await ses.send(new SendEmailCommand({
+    Source: process.env.SES_FROM_ADDRESS,
+    Destination: { ToAddresses: [to] },
+    Message: {
+      Subject: { Data: subject },
+      Body: { Text: { Data: body } },
+    },
+  }));
+}
 ```
 
 The value is fetched once on Lambda cold start. If you rotate the secret, you need to redeploy for the new value to take effect — SST doesn't hot-reload secrets.
@@ -675,7 +686,6 @@ The workflow:
 
 ```bash
 # Set all secrets before first production deploy
-npx sst secret set MailgunApiKey   "..."  --stage production
 npx sst secret set StripeWebhookSecret "..." --stage production
 
 # Then deploy
@@ -691,7 +701,6 @@ If secrets change frequently or you want CI to manage them, inject from GitHub A
 ```yaml
 - name: Set SST secrets
   run: |
-    npx sst secret set MailgunApiKey "${{ secrets.MAILGUN_API_KEY }}" --stage production
     npx sst secret set StripeWebhookSecret "${{ secrets.STRIPE_WEBHOOK_SECRET }}" --stage production
 ```
 
@@ -705,7 +714,7 @@ If credentials are committed to the repo or appear in logs:
 2. Update in SST: `npx sst secret set <SecretName> "new-value" --stage production`
 3. Redeploy to pick up the new value
 4. Scrub from git history if committed: `git filter-repo --path .env --invert-paths && git push --force --all`
-5. Check whether the exposed credential was used (Mailgun, Stripe, and Cognito all have access logs)
+5. Check whether the exposed credential was used (Stripe, Cognito, and SES all have access logs or CloudTrail entries)
 
 GitHub has secret scanning enabled by default on public repos and will email you if it detects known secret patterns in commits. This is a useful safety net — but act on it immediately, don't treat it as a delayed notification.
 

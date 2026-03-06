@@ -71,7 +71,7 @@ The other handler types from `@types/aws-lambda` follow the same pattern — `SQ
 
 Always include `context` in your handler signature. You might not use it in every function, but two things make it invaluable:
 
-**`context.requestId`** is the Lambda request ID — a UUID that identifies this specific invocation. When you log it with every log entry, you can filter CloudWatch Logs to a single request and see everything that happened. Without it, debugging concurrent requests is guesswork.
+**`context.awsRequestId`** is the Lambda request ID — a UUID that identifies this specific invocation. When you log it with every log entry, you can filter CloudWatch Logs to a single request and see everything that happened. Without it, debugging concurrent requests is guesswork.
 
 **`context.getRemainingTimeInMillis()`** tells you how much of the Lambda timeout is left. If you're in a loop and want to stop before Lambda hard-kills you — relevant for batch jobs and queue workers — this is how you do it safely:
 

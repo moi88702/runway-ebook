@@ -260,47 +260,47 @@ export default $config({
       handler: "src/functions/health.handler",
     });
 
-    api.route("GET /workspaces/{workspaceId}", {
+    api.route("GET /v1/workspaces/{workspaceId}", {
       handler: "src/functions/workspaces/get.handler",
       ...routeDefaults,
     });
 
-    api.route("POST /workspaces", {
+    api.route("POST /v1/workspaces", {
       handler: "src/functions/workspaces/create.handler",
       ...routeDefaults,
     });
 
-    api.route("GET /workspaces/{workspaceId}/clients", {
+    api.route("GET /v1/workspaces/{workspaceId}/clients", {
       handler: "src/functions/clients/list.handler",
       ...routeDefaults,
     });
 
-    api.route("GET /workspaces/{workspaceId}/clients/{clientId}", {
+    api.route("GET /v1/workspaces/{workspaceId}/clients/{clientId}", {
       handler: "src/functions/clients/get.handler",
       ...routeDefaults,
     });
 
-    api.route("POST /workspaces/{workspaceId}/clients", {
+    api.route("POST /v1/workspaces/{workspaceId}/clients", {
       handler: "src/functions/clients/create.handler",
       ...routeDefaults,
     });
 
-    api.route("GET /clients/{clientId}/projects", {
+    api.route("GET /v1/clients/{clientId}/projects", {
       handler: "src/functions/projects/list.handler",
       ...routeDefaults,
     });
 
-    api.route("POST /clients/{clientId}/projects", {
+    api.route("POST /v1/clients/{clientId}/projects", {
       handler: "src/functions/projects/create.handler",
       ...routeDefaults,
     });
 
-    api.route("GET /projects/{projectId}/invoices", {
+    api.route("GET /v1/projects/{projectId}/invoices", {
       handler: "src/functions/invoices/list.handler",
       ...routeDefaults,
     });
 
-    api.route("POST /projects/{projectId}/invoices", {
+    api.route("POST /v1/projects/{projectId}/invoices", {
       handler: "src/functions/invoices/create.handler",
       ...routeDefaults,
     });
@@ -893,7 +893,7 @@ And the handler that exposes it:
 // src/functions/clients/list.ts
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
 import { listClients } from "../../repositories/clients";
-import { ok, notFound } from "../../lib/response";
+import { res } from "../../lib/response";
 import { getWorkspace } from "../../repositories/workspaces";
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
@@ -904,14 +904,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const cursor = event.queryStringParameters?.cursor;
 
   const workspace = await getWorkspace(workspaceId);
-  if (!workspace) return notFound("Workspace");
+  if (!workspace) return res.notFound("Workspace");
 
   const result = await listClients(workspaceId, {
     limit: Math.min(limit, 100),
     cursor,
   });
 
-  return ok(result);
+  return res.ok(result);
 };
 ```
 
@@ -1153,4 +1153,4 @@ Chapter 5 adds the second data layer: Aurora Serverless for Runway's financial r
 
 ---
 
-> **The code for this chapter** is available at `04-dynamodb-full-type-safety/` in the companion repository.
+> **The code for this chapter** is on the `chapter-4` branch of the companion repository.

@@ -2343,4 +2343,4 @@ By the end of Chapter 4, every endpoint returns real data from a real database.
 
 ---
 
-> **The code for this chapter** is available at `03-type-safe-apis/` in the companion repository. The schemas, validation middleware, and all handlers are complete and tested. Run `npm install && npx sst dev` to start it, then try `curl -X POST https://your-api-url/v1/workspaces -d '{"name": "Acme", "slug": ""}' -H "Content-Type: application/json"` to see the validation error response in action.
+> **The code for this chapter** is on the `chapter-3` branch of the companion repository. The schemas, validation middleware, and all handlers are complete and tested. Run `npm install && npx sst dev` to start it, then try `curl -X POST https://your-api-url/v1/workspaces -d '{"name": "Acme", "slug": ""}' -H "Content-Type: application/json"` to see the validation error response in action.

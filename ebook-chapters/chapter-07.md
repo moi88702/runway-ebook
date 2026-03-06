@@ -108,7 +108,7 @@ export default $config({
       auth: { iam: false },
     });
 
-    api.route("GET /workspaces/{workspaceId}", {
+    api.route("GET /v1/workspaces/{workspaceId}", {
       handler: "src/functions/workspaces/get.handler",
       link: [table],
     });
@@ -266,7 +266,7 @@ Update the workspace handler to use authentication:
 import type { APIGatewayProxyHandlerV2WithJWTAuthorizer } from "aws-lambda";
 import { getAuthUser } from "../../lib/auth";
 import { getWorkspaceByOwner } from "../../repositories/workspaces";
-import { ok, forbidden, notFound } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 
 export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
@@ -280,11 +280,11 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
   const workspace = await getWorkspaceByOwner(workspaceId, user.sub);
 
   if (!workspace) {
-    return notFound("Workspace");
+    return res.notFound("Workspace");
   }
 
   logger.info("Workspace fetched", { workspaceId, userId: user.sub });
-  return ok(workspace);
+  return res.ok(workspace);
 };
 ```
 
@@ -369,7 +369,7 @@ import type { APIGatewayProxyHandlerV2WithJWTAuthorizer } from "aws-lambda";
 import { getAuthUser } from "../../lib/auth";
 import { getWorkspaceByOwner } from "../../repositories/workspaces";
 import { listClients } from "../../repositories/clients";
-import { ok, notFound } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 
 export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
@@ -381,7 +381,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
   const workspaceId = event.pathParameters?.workspaceId!;
 
   const workspace = await getWorkspaceByOwner(workspaceId, user.sub);
-  if (!workspace) return notFound("Workspace");
+  if (!workspace) return res.notFound("Workspace");
 
   const limit = Number(event.queryStringParameters?.limit ?? 50);
   const cursor = event.queryStringParameters?.cursor;
@@ -397,7 +397,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (
     count: result.items.length,
   });
 
-  return ok(result);
+  return res.ok(result);
 };
 ```
 
@@ -427,7 +427,7 @@ import { Resource } from "sst";
 import { getAuthUser } from "../../lib/auth";
 import { getWorkspaceByOwner } from "../../repositories/workspaces";
 import { getClient } from "../../repositories/clients";
-import { ok, notFound, badRequest } from "../../lib/response";
+import { res } from "../../lib/response";
 
 const cognito = new CognitoIdentityProviderClient({});
 
@@ -437,10 +437,10 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
   const clientId = event.pathParameters?.clientId!;
 
   const workspace = await getWorkspaceByOwner(workspaceId, user.sub);
-  if (!workspace) return notFound("Workspace");
+  if (!workspace) return res.notFound("Workspace");
 
   const client = await getClient(workspaceId, clientId);
-  if (!client) return notFound("Client");
+  if (!client) return res.notFound("Client");
 
   await cognito.send(
     new AdminCreateUserCommand({
@@ -457,7 +457,7 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
     }),
   );
 
-  return ok({ message: `Invitation sent to ${client.email}` });
+  return res.ok({ message: `Invitation sent to ${client.email}` });
 };
 ```
 
@@ -525,22 +525,22 @@ export const handler: APIGatewayProxyHandlerV2WithJWTAuthorizer = async (event) 
 
   if (user.role === "owner") {
     const client = await getClientWithOwnerCheck(clientId, user.sub);
-    if (!client) return notFound("Client");
+    if (!client) return res.notFound("Client");
 
     const projects = await listProjects(clientId);
-    return ok(projects);
+    return res.ok(projects);
   }
 
   if (user.role === "client") {
     if (user.clientId !== clientId) {
-      return notFound("Client");
+      return res.notFound("Client");
     }
 
     const projects = await listProjects(clientId);
-    return ok(projects);
+    return res.ok(projects);
   }
 
-  return forbidden();
+  return res.forbidden();
 };
 ```
 
@@ -653,7 +653,7 @@ This merges the Google account into the existing Cognito user. After the link, b
 
 ## 7.8 Alternatives Worth Knowing
 
-This chapter uses Cognito because it's native to AWS, serverless, and has no per-monthly-active-user cost up to 50,000 MAUs (after that it's $0.0055/MAU). For Runway, Cognito is the right call.
+This chapter uses Cognito because it's native to AWS, serverless, and has no per-monthly-active-user cost up to 50,000 MAUs (after that it's $0.0055/MAU at the time of writing — verify current pricing at aws.amazon.com/cognito/pricing before committing). For Runway, Cognito is the right call.
 
 For completeness, the alternatives:
 
@@ -701,4 +701,4 @@ Chapter 8 adds the async layer: queues and background jobs. When an invoice is m
 
 ---
 
-> **The code for this chapter** is available at `07-authentication-cognito/` in the companion repository.
+> **The code for this chapter** is on the `chapter-7` branch of the companion repository.

@@ -89,13 +89,13 @@ export default $config({
 
     const api = new sst.aws.ApiGatewayV2("RunwayApi");
 
-    api.route("GET /workspaces/{workspaceId}/reports/revenue", {
+    api.route("GET /v1/workspaces/{workspaceId}/reports/revenue", {
       handler: "src/functions/reports/revenue.handler",
       link: [db, table],
       vpc,  // ← puts this Lambda inside the VPC
     });
 
-    api.route("GET /workspaces/{workspaceId}/reports/clients", {
+    api.route("GET /v1/workspaces/{workspaceId}/reports/clients", {
       handler: "src/functions/reports/clients.handler",
       link: [db],
       vpc,
@@ -395,7 +395,7 @@ Three deploys instead of one. Worth it for columns where existing rows need back
 
 ---
 
-## 5.6 Lambda Event Sourcing from RDS
+## 5.6 Lambda–Aurora Integration Patterns
 
 This is where Runway's two databases talk to each other.
 
@@ -596,12 +596,13 @@ With payments in Aurora, the reports are simple SQL:
 // src/functions/reports/revenue.ts
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
 import { getPrismaClient } from "../../lib/prisma";
-import { ok, notFound } from "../../lib/response";
+import { res } from "../../lib/response";
 import { createLogger } from "../../lib/logger";
 
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   const logger = createLogger(context.awsRequestId);
-  const workspaceId = event.pathParameters?.workspaceId!;
+  const workspaceId = event.pathParameters?.workspaceId;
+  if (!workspaceId) return res.badRequest("workspaceId is required");
   const prisma = getPrismaClient();
 
   try {
@@ -634,7 +635,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
       _count: { invoiceId: true },
     });
 
-    return ok({
+    return res.ok({
       monthly: monthlyRevenue.map((row) => ({
         month: row.month.toISOString().slice(0, 7),
         totalCents: Number(row.total_cents),
@@ -716,11 +717,11 @@ Runway now has a two-database architecture that's right for the job:
   └── Invoices
 
 [API Gateway + Lambda]
-  ├── /workspaces/**         → DynamoDB
-  ├── /clients/**            → DynamoDB
-  ├── /projects/**           → DynamoDB
-  ├── /invoices/**           → DynamoDB (+ records to Aurora on payment)
-  └── /reports/**            → Aurora (read-only)
+  ├── /v1/workspaces/**      → DynamoDB
+  ├── /v1/clients/**         → DynamoDB
+  ├── /v1/projects/**        → DynamoDB
+  ├── /v1/invoices/**        → DynamoDB (+ records to Aurora on payment)
+  └── /v1/reports/**         → Aurora (read-only)
 ```
 
 Operational reads are sub-millisecond from DynamoDB. Analytical queries use SQL in Aurora where they belong. The two systems stay in sync via the `recordPayment` function, which writes to both atomically.
@@ -729,4 +730,4 @@ Chapter 6 adds S3 — file storage for Runway's deliverables and generated invoi
 
 ---
 
-> **The code for this chapter** is available at `05-rds-aurora-serverless/` in the companion repository.
+> **The code for this chapter** is on the `chapter-5` branch of the companion repository.
